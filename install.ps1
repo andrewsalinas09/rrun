@@ -1,5 +1,6 @@
 # install.ps1 — deploys rrun + shell-boundary class fixes on Windows + WSL.
-# Idempotent: safe to re-run; existing settings are respected, not clobbered.
+# Idempotent AND self-updating: rerunning refreshes every installed artifact,
+# including the ~/.rrun/bash_env file and the sourcing block in ~/.bashrc.
 # Requires: Windows 10/11, WSL with a default Linux distro, Git Bash (for the bash shim).
 # Pure-Linux machines: skip this; just copy bin/rrun to ~/.local/bin and chmod +x.
 $ErrorActionPreference = 'Stop'
@@ -11,13 +12,13 @@ function ToWslPath([string]$p) {
   return $r
 }
 
-Write-Host '[1/5] WSL core -> ~/.local/bin/rrun'
+Write-Host '[1/6] WSL core -> ~/.local/bin/rrun'
 $srcWsl = ToWslPath (Join-Path $repo 'bin\rrun')
 $sh = 'mkdir -p "$HOME/.local/bin" && tr -d ''\r'' < "{0}" > "$HOME/.local/bin/rrun" && chmod +x "$HOME/.local/bin/rrun" && bash -n "$HOME/.local/bin/rrun"' -f $srcWsl
 wsl.exe -e sh -c $sh
 if ($LASTEXITCODE -ne 0) { throw 'WSL core install failed (is a WSL distro installed and running?)' }
 
-Write-Host '[2/5] Windows shims -> %USERPROFILE%\.local\bin'
+Write-Host '[2/6] Windows shims -> %USERPROFILE%\.local\bin'
 $dest = Join-Path $env:USERPROFILE '.local\bin'
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 # bash shim must land with LF endings and no BOM or Git Bash chokes on the shebang
@@ -31,26 +32,45 @@ if (($userPath -split ';') -notcontains $dest) {
   Write-Host "  added $dest to user PATH (takes effect in new sessions)"
 }
 
-Write-Host '[3/5] Git Bash profile (~/.bashrc, ~/.bash_profile)'
-$marker  = '# >>> claude-shell-boundary >>>'
-$rc      = Join-Path $env:USERPROFILE '.bashrc'
-$snippet = (Get-Content -Raw (Join-Path $repo 'profile\bashrc-snippet.sh')) -replace "`r", ''
-if (-not (Test-Path $rc) -or ((Get-Content -Raw $rc) -notlike "*$marker*")) {
-  [IO.File]::AppendAllText($rc, "`n" + $snippet)
-  Write-Host '  appended boundary-fix block to ~/.bashrc'
+Write-Host '[3/6] Boundary env file -> ~/.rrun/bash_env (always refreshed)'
+$rrunDir = Join-Path $env:USERPROFILE '.rrun'
+New-Item -ItemType Directory -Force -Path $rrunDir | Out-Null
+$envFile = Join-Path $rrunDir 'bash_env'
+$snippet = (Get-Content -Raw (Join-Path $repo 'profile\bash_env.sh')) -replace "`r", ''
+[IO.File]::WriteAllText($envFile, $snippet)
+
+Write-Host '[4/6] Shell integration (~/.bashrc, ~/.bash_profile)'
+$srcLine = '[ -f "$HOME/.rrun/bash_env" ] && . "$HOME/.rrun/bash_env"'
+$block = "# >>> claude-shell-boundary >>>`n$srcLine`n# <<< claude-shell-boundary <<<"
+$blockPat = '(?s)# >>> claude-shell-boundary >>>.*?# <<< claude-shell-boundary <<<'
+$rc = Join-Path $env:USERPROFILE '.bashrc'
+if (Test-Path $rc) {
+  $txt = (Get-Content -Raw $rc) -replace "`r", ''
+  if ($txt -match $blockPat) {
+    # replace between markers so reruns propagate updates (never treat the
+    # marker's mere presence as "already current")
+    $txt = [regex]::Replace($txt, $blockPat, [Text.RegularExpressions.MatchEvaluator] { $block })
+  } else {
+    $txt = $txt.TrimEnd("`n") + "`n`n$block`n"
+  }
 } else {
-  Write-Host '  ~/.bashrc already has the boundary-fix block'
+  $txt = "$block`n"
 }
+[IO.File]::WriteAllText($rc, $txt)
 $bp = Join-Path $env:USERPROFILE '.bash_profile'
 if (-not (Test-Path $bp)) {
   [IO.File]::WriteAllText($bp, "[ -f ~/.bashrc ] && . ~/.bashrc`n")
   Write-Host '  created ~/.bash_profile -> sources ~/.bashrc'
+} elseif (((Get-Content -Raw $bp) -notmatch '\.bashrc') -and ((Get-Content -Raw $bp) -notmatch '\.rrun')) {
+  [IO.File]::AppendAllText($bp, "`n$srcLine`n")
+  Write-Host '  ~/.bash_profile did not source ~/.bashrc — appended bash_env source line'
 }
 
-Write-Host '[4/5] User environment variables'
-$wantEnv = ($env:USERPROFILE -replace '\\', '/') + '/.bashrc'
+Write-Host '[5/6] User environment variables'
+$wantEnv = ($env:USERPROFILE -replace '\\', '/') + '/.rrun/bash_env'
+$oldDefault = ($env:USERPROFILE -replace '\\', '/') + '/.bashrc'
 $curBashEnv = [Environment]::GetEnvironmentVariable('BASH_ENV', 'User')
-if (-not $curBashEnv) {
+if ((-not $curBashEnv) -or ($curBashEnv -eq $oldDefault)) {
   [Environment]::SetEnvironmentVariable('BASH_ENV', $wantEnv, 'User')
   Write-Host "  BASH_ENV=$wantEnv  (loads wrappers into non-interactive bash, e.g. Claude's Bash tool)"
 } elseif ($curBashEnv -ne $wantEnv) {
@@ -61,11 +81,9 @@ if (-not [Environment]::GetEnvironmentVariable('PYTHONIOENCODING', 'User')) {
   Write-Host '  PYTHONIOENCODING=utf-8'
 }
 
-Write-Host '[5/5] Verify (dry-run through every entry point)'
-wsl.exe -e sh -c '"$HOME/.local/bin/rrun" -n examplehost -c hostname'
-if ($LASTEXITCODE -ne 0) { throw 'WSL core verify failed' }
-& (Join-Path $dest 'rrun.ps1') -n examplehost -c hostname
-if ($LASTEXITCODE -ne 0) { throw 'PowerShell shim verify failed' }
+Write-Host '[6/6] Verify — full smoke suite'
+& (Join-Path $repo 'test.ps1')
+if ($LASTEXITCODE -ne 0) { throw "verification failed: $LASTEXITCODE test(s) did not pass" }
 
 Write-Host ''
 Write-Host 'Installed. Restart terminals / Claude Code sessions so PATH, BASH_ENV and'

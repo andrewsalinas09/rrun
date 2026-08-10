@@ -1,6 +1,6 @@
 # rrun — zero-escaping remote & cross-shell execution
 
-**Version 2.1.0** (core v2.1, shims v1.1) · Windows + WSL + any ssh-reachable host
+**Version 2.2.0** (core v2.2, shims v1.2) · Windows + WSL + any ssh-reachable host
 
 Run a script or command on any host, through any chain of shells (PowerShell ↔ Git Bash ↔ WSL ↔ ssh ↔ remote bash/PowerShell), **without writing a single escape character**. Payloads travel as base64 — inert in every parser — and are decoded only by the shell that executes them.
 
@@ -30,6 +30,7 @@ crosses four parsers; hand-counting which one consumes each `$` and `"` fails ro
 1. **Payload-as-data**: the script never appears inside a quoted string. It is base64-encoded (`[A-Za-z0-9+/=]` — no metacharacters exist), transported, and decoded by its executor: PowerShell natively via `-EncodedCommand` (UTF-16LE), POSIX shells via `echo <b64> | base64 -d | bash`.
 2. **Per-layer re-armoring for multi-hop**: for `hostA,hostB` chains, the command each intermediate host runs is `ssh next 'echo <b64> | base64 -d | bash'` — the quoted part is itself pure base64, so quoting depth stays at one regardless of hop count.
 3. **No shell re-parsing at the WSL boundary**: shims invoke `wsl.exe -e` (direct exec), so the WSL default shell never expands your argv.
+4. **Streaming for large payloads**: a base64-embedded command can exceed the remote command-line limit — 8,191 chars via `cmd.exe` on stock Windows OpenSSH, which caps embedded PowerShell payloads near 3 KB (UTF-16LE+base64 is ~2.67× expansion). When the composed command would exceed `RRUN_STREAM_LIMIT` (default 6000) on a single-hop (or `-J`) target, rrun automatically streams the base64 over stdin behind a small fixed bootstrap instead. Oversized payloads on nested-hop chains to PowerShell targets fail fast with advice to use `-J`.
 
 ## Components & install paths
 
@@ -38,8 +39,9 @@ crosses four parsers; hand-counting which one consumes each `$` and `"` fails ro
 | `bin/rrun` | WSL `~/.local/bin/rrun` | Core: encodes payload, composes ssh command, multi-hop armoring. POSIX-only deps (bash, base64, iconv, ssh) — also works standalone on any Linux box. |
 | `bin/rrun-shim.bash` | `%USERPROFILE%\.local\bin\rrun` | Git Bash entry point. `MSYS_NO_PATHCONV=1` + `wsl -e` + Windows→`/mnt` path translation + `local` host mode. |
 | `bin/rrun.ps1` | `%USERPROFILE%\.local\bin\rrun.ps1` | PowerShell entry point (PowerShell resolves `rrun` → `rrun.ps1` via PATH). Same features as the bash shim. |
-| `profile/bashrc-snippet.sh` | appended to `~/.bashrc` (+ `~/.bash_profile` created if absent) | `wsl`/`adb` wrapper functions with `MSYS_NO_PATHCONV=1`; `PYTHONIOENCODING` export. |
-| `install.ps1` | — | Idempotent installer + verifier for all of the above. |
+| `profile/bash_env.sh` | `~/.rrun/bash_env` (always refreshed on reinstall) + a marker-delimited sourcing block maintained in `~/.bashrc` | `wsl`/`adb` wrapper functions with `MSYS_NO_PATHCONV=1`; `PYTHONIOENCODING` export. Kept as a dedicated tiny file so `BASH_ENV` never has to run a full `.bashrc` (which may early-return for non-interactive shells, or run unrelated init). |
+| `install.ps1` | — | Idempotent, self-updating installer; verifies by running the full test suite. |
+| `test.ps1` / `tests/core-tests.sh` | — | Installed-artifact smoke suite (Windows) / mocked-ssh core regression suite (any Linux; runs in CI). |
 
 `%USERPROFILE%\.local\bin` is added to the user PATH if not already present.
 
@@ -47,7 +49,7 @@ crosses four parsers; hand-counting which one consumes each `$` and `"` fails ro
 
 | Variable | Value | Why |
 |---|---|---|
-| `BASH_ENV` | `<home>/.bashrc` (forward slashes) | Non-interactive, non-login bash (what Claude Code's Bash tool spawns) reads *no* profile — `BASH_ENV` is the only hook that reaches it, loading the `wsl`/`adb` wrappers. Not clobbered if already set. |
+| `BASH_ENV` | `<home>/.rrun/bash_env` (forward slashes) | Non-interactive, non-login bash (what Claude Code's Bash tool spawns) reads *no* profile — `BASH_ENV` is the only hook that reaches it, loading the `wsl`/`adb` wrappers. Points at the dedicated file, not `.bashrc`. Not clobbered if already set to something unrelated (a previous rrun `.bashrc` value is migrated). |
 | `PYTHONIOENCODING` | `utf-8` | Kills the cp1252 `UnicodeEncodeError` class for Python stdio. Deliberately *not* `PYTHONUTF8=1`, which would also change file-open defaults. |
 | `MSYS_NO_PATHCONV` | (per-call, in wrappers/shims — never global) | Global disable would break tools that want `/c/…` → `C:\…` translation. |
 
@@ -77,11 +79,15 @@ rrun local -c '$PSVersionTable'            # local PowerShell, no quoting hazard
 echo 'uname -a' | rrun -s bash pi -        # payload from stdin
 ```
 
-**Caveats**: in `bash`/`sh` mode the payload's stdin is the decode pipe, so interactively-prompting scripts won't work. `BatchMode=yes` is always on — key auth only, no password prompts.
+**Caveats**:
+- In `bash`/`sh` mode the payload's stdin **is the decode pipe**: a `read` in the payload consumes the payload's *own next line*, not your input. Payloads must be non-interactive.
+- Streamed (large) payloads consume remote stdin in `ps` mode too.
+- `local` mode is bounded by the 32,767-char Windows process command line (~12 KB PowerShell payload); beyond that, use a file with `powershell -File`.
+- `BatchMode=yes` is always on — key auth only, no password prompts; rrun never auto-accepts host keys.
 
 ## Install
 
-**Humans**: clone, then in PowerShell run `.\install.ps1`. Re-run any time; it's idempotent. Verify with `.\test.ps1` — 11 checks needing no remote host (dry-run composition through every entry point, real execution via `local` mode, CLIXML cleanliness, `$(subst)` survival); add `-TargetHost <host>` for a real ssh round-trip.
+**Humans**: clone, then in PowerShell run `.\install.ps1`. Re-run any time — it's idempotent *and* self-updating (refreshes `~/.rrun/bash_env` and the `.bashrc` block contents). It finishes by running `test.ps1`, which needs no remote host; add `.\test.ps1 -TargetHost <host>` afterwards for real ssh round-trips including the streaming path. `tests/core-tests.sh` runs the core against a mocked ssh on any Linux (and in CI on every push).
 
 **Claude / AI agents**: point the agent at this repo and say "install this" — `CLAUDE.md` contains the exact steps and post-install rules of engagement.
 
@@ -89,6 +95,7 @@ echo 'uname -a' | rrun -s bash pi -        # payload from stdin
 
 ## Changelog
 
+- **2.2.0** (2026-08-10) — external-review fixes. **Bugs**: `-n local` no longer *executes* the payload (dry-run safety); `-c` arguments are opaque — only the script-source operand gets Windows→`/mnt` translation (previously `-c ./deploy.sh` could be rewritten to a local `/mnt/...` path). **Transport**: automatic stdin-streaming for payloads whose composed command exceeds `RRUN_STREAM_LIMIT` (default 6000; Windows `cmd.exe` 8191-char ceiling), fail-fast with `-J` advice for oversized nested-hop ps targets. **Hardening**: host tokens validated (only payload is armored; hop names are interpolated), `-s` validated in core and shims, missing-optarg errors, `cat --`, `%q` paste-safe dry-run output. **Install**: `BASH_ENV` now points at dedicated `~/.rrun/bash_env` (tiny, always refreshed; migrated automatically from the old `.bashrc` target); `.bashrc` marker block *replaced* on rerun, `.bash_profile` repaired if it doesn't source `.bashrc`; installer verifies via the full test suite. **CI**: mocked-ssh core regression suite (`tests/core-tests.sh`) on every push.
 - **2.1.0** (2026-08-10) — Windows shims (Git Bash + PowerShell) with `wsl -e`, path translation, `local` host; `$HOME` trampoline removes hardcoded usernames; CLIXML progress suppression; `bashrc` wrappers + `BASH_ENV` delivery; installer.
 - **2.0.0** (2026-08-10) — bash/sh targets, comma multi-hop with per-layer re-armoring, `-J`, `-n`, extension autodetect.
 - **1.0.0** — PowerShell `-EncodedCommand` over ssh, single hop.

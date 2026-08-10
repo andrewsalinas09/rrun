@@ -8,19 +8,28 @@
 # usage: rrun [-s ps|bash|sh] [-J jumphosts] [-n] <host[,host2,...]> <script | - | -c "cmds">
 #   -s ps|bash|sh  target shell on the FINAL host (default ps; *.sh/*.bash files -> bash)
 #   -J jumphosts   ssh ProxyJump — preferred for hops when local can auth to the final host
-#   -n             dry-run: print the composed ssh invocation instead of running it
+#   -n             dry-run: print the composed invocation (shell-quoted, paste-safe)
 #   host,host2     nested-hop chain (use when intermediate hosts hold the keys);
 #                  intermediate hops need base64 + bash; payload runs on the LAST host.
-#   note: in bash/sh mode the payload's stdin is the decode pipe, so scripts that
-#   read interactive stdin won't get it.
+#
+# caveats:
+#   * bash/sh payloads read their script from the decode pipe: a `read` in the
+#     payload consumes the payload's OWN NEXT LINE, not your terminal.
+#   * large payloads (composed command > RRUN_STREAM_LIMIT, default 6000 chars —
+#     sized for the 8191-char cmd.exe limit on stock Windows OpenSSH targets)
+#     auto-switch to streaming the base64 over stdin; the remote payload then
+#     cannot read stdin. Streaming needs a single hop — for big payloads through
+#     intermediaries use -J, which is still one ssh connection.
 #
 # history:
 #   v1            PowerShell -EncodedCommand only, single hop.
-#   v2   2026-08-10 bash/sh targets (echo b64 | base64 -d | sh), comma multi-hop with
-#                 per-layer re-armoring, -J ProxyJump passthrough, -n dry-run,
-#                 extension autodetect. Cause: hand-escaped \$(...) across
-#                 bash->wsl->ssh miscounted a layer. Class fix per RSI rule.
+#   v2   2026-08-10 bash/sh targets, comma multi-hop with per-layer re-armoring,
+#                 -J, -n, extension autodetect. Class fix per RSI rule.
 #   v2.1 2026-08-10 ps payloads get $ProgressPreference prepended (CLIXML noise).
+#   v2.2 2026-08-10 external review fixes: stdin-streaming transport for large
+#                 payloads (Windows 8191-char command-line ceiling), %q paste-safe
+#                 dry-run, host-token validation, -s validation, missing-optarg
+#                 errors, cat --, size guard on multi-hop ps targets.
 set -euo pipefail
 
 shell="" jump="" dry=0
@@ -29,6 +38,7 @@ while getopts ":s:J:n" opt; do
     s) shell=$OPTARG ;;
     J) jump=$OPTARG ;;
     n) dry=1 ;;
+    :) echo "rrun: option -$OPTARG requires an argument" >&2; exit 2 ;;
     *) echo "rrun: unknown option -${OPTARG:-}" >&2; exit 2 ;;
   esac
 done
@@ -44,7 +54,7 @@ src=$1
 case "$src" in
   -c) payload=${2:?rrun: -c needs a command string} ;;
   -)  payload=$(cat) ;;
-  *)  payload=$(cat "$src") ;;
+  *)  payload=$(cat -- "$src") ;;
 esac
 
 if [[ -z $shell ]]; then
@@ -65,10 +75,34 @@ case "$shell" in
     b64=$(printf %s "$payload" | base64 -w0)
     cmd="echo $b64 | base64 -d | $shell"
     ;;
-  *) echo "rrun: unknown target shell '$shell'" >&2; exit 2 ;;
+  *) echo "rrun: -s must be ps, bash or sh (got '$shell')" >&2; exit 2 ;;
 esac
 
 IFS=, read -ra hops <<<"$hostspec"
+# Hop tokens are the ONE thing interpolated into intermediate shell commands
+# (the payload itself is always armored) — so they must be plain host tokens.
+for h in "${hops[@]}"; do
+  if [[ ! $h =~ ^[A-Za-z0-9._@:-]+$ ]]; then
+    echo "rrun: invalid host token '$h' (allowed: letters, digits, . _ @ : -)" >&2
+    exit 2
+  fi
+done
+
+# Large payloads: the full command (payload embedded) can blow past the remote
+# command-line limit — 8191 chars via cmd.exe on stock Windows OpenSSH. For a
+# single hop (incl. -J), switch to streaming the base64 over stdin behind a
+# small fixed bootstrap; the bootstrap contains no shell metacharacters beyond
+# what cmd.exe/powershell/bash all pass through literally.
+limit=${RRUN_STREAM_LIMIT:-6000}
+stream=0
+if (( ${#hops[@]} == 1 && ${#cmd} > limit )); then
+  stream=1
+  case "$shell" in
+    ps) cmd="powershell -NoProfile -ExecutionPolicy Bypass -Command iex([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd())))" ;;
+    *)  cmd="base64 -d | $shell" ;;
+  esac
+fi
+
 # Wrap outward from the final hop: each intermediate host runs
 #   ssh <next> 'echo <b64> | base64 -d | bash'
 # where the quoted part is pure base64 — no hop ever parses a metacharacter
@@ -78,13 +112,29 @@ for ((i=${#hops[@]}-2; i>=0; i--)); do
   cmd="ssh -o BatchMode=yes ${hops[i+1]} 'echo $b | base64 -d | bash'"
 done
 
+if (( ${#hops[@]} > 1 )) && [[ $shell == ps ]] && (( ${#cmd} > limit )); then
+  echo "rrun: payload too large for a nested-hop chain to a PowerShell target (Windows command-line limit); use -J <hops> instead — ProxyJump is a single connection and can stream" >&2
+  exit 2
+fi
+
 sshopts=(-o BatchMode=yes)
 if [[ -n $jump ]]; then
   sshopts+=(-J "$jump")
 fi
 
 if (( dry )); then
-  printf 'ssh %s %s %s\n' "${sshopts[*]}" "${hops[0]}" "$cmd"
-else
-  exec ssh "${sshopts[@]}" "${hops[0]}" "$cmd"
+  # %q makes the printed command paste-safe: without it, "| base64 -d | bash"
+  # would execute LOCALLY if someone copied the dry-run output into a shell.
+  if (( stream )); then
+    printf 'printf %%s %s | ssh %s %s %q\n' "$b64" "${sshopts[*]}" "${hops[0]}" "$cmd"
+  else
+    printf 'ssh %s %s %q\n' "${sshopts[*]}" "${hops[0]}" "$cmd"
+  fi
+  exit 0
 fi
+
+if (( stream )); then
+  printf %s "$b64" | ssh "${sshopts[@]}" "${hops[0]}" "$cmd"
+  exit $?
+fi
+exec ssh "${sshopts[@]}" "${hops[0]}" "$cmd"

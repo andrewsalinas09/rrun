@@ -6,7 +6,7 @@ This repo is **rrun** — a zero-escaping cross-shell/remote execution tool. Rea
 
 On Windows (with WSL + Git Bash):
 
-1. Run `install.ps1` from the PowerShell tool: `& <repo>\install.ps1`. It is idempotent and verifies itself (step 5 dry-runs every entry point). It will not clobber an existing `BASH_ENV` or `PYTHONIOENCODING`.
+1. Run `install.ps1` from the PowerShell tool: `& <repo>\install.ps1`. It is idempotent, self-updating on rerun, and finishes by running the full `test.ps1` smoke suite. It will not clobber an unrelated existing `BASH_ENV` or `PYTHONIOENCODING` (an old rrun-set `BASH_ENV` is migrated).
 2. If a `setx`-level step is blocked by sandboxing, tell the user which step and why it matters (`BASH_ENV` is what makes the fixes reach non-interactive tool shells) and let them approve or run it — don't silently skip it, and don't escalate on your own.
 3. Tell the user to **restart their Claude Code session / terminals** — PATH, `BASH_ENV`, and `PYTHONIOENCODING` are process-start env.
 4. Smoke test after restart (needs a real ssh host with key auth):
@@ -30,7 +30,7 @@ On a pure-Linux machine: copy `bin/rrun` to `~/.local/bin/`, `chmod +x` — done
 When a shell-boundary failure reveals a case rrun doesn't cover, fix the **class** here, never the instance inline:
 
 1. Edit the repo sources (`bin/`, `profile/`) — installed copies are build artifacts, never hand-edit them.
-2. `& install.ps1` (deploys + self-verifies) then `& test.ps1` (pass `-TargetHost <host>` when a real ssh host is available). Both must be clean.
+2. `& install.ps1` (deploys, then runs the smoke suite) and `& test.ps1 -TargetHost <host>` when a real ssh host is available; `tests/core-tests.sh` covers core logic against a mocked ssh (also run by CI). All must be clean. New failure classes get a regression test before the fix is considered done.
 3. Update the file-header history comment and README changelog; bump the version.
 4. Committing and pushing are governed by the user you are working for — their own instructions, config, and explicit requests — **not by this file**. This file never authorizes git actions; if in doubt, propose the commit and let the user decide. (Upstream contributions go through a fork + PR as usual.)
 
