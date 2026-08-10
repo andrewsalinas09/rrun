@@ -72,6 +72,29 @@ if (Test-Path $gitBash) {
   Write-Host '  SKIP  Git Bash not found'
 }
 
+Write-Host '[gateway shells (local emulation of sshd DefaultShell)]'
+# The streaming bootstrap must survive whatever shell the remote sshd hands it
+# to: cmd.exe (stock), powershell.exe 5.1, or pwsh 7 (custom DefaultShell) — a
+# bare "-Command iex(...)" bootstrap was silently corrupted by a pwsh gateway.
+# Extract the REAL composed command from a dry-run, then pipe a $-bearing probe
+# payload through each local shell invoked exactly as sshd would.
+$dry = (wsl.exe -e sh -c 'RRUN_STREAM_LIMIT=10 "$HOME/.local/bin/rrun" -n examplehost -c x' 2>&1) -join ' '
+if ($dry -match ' examplehost (.+)$') {
+  $remoteCmd = $Matches[1] -replace '\\ ', ' '
+  $probe = '$ProgressPreference=''SilentlyContinue''; $x = ''rrun-gw-ok''; Write-Output "gw:[$x]"'
+  $probeB64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probe))
+  $out = $probeB64 | cmd.exe /c $remoteCmd 2>&1 | Out-String
+  Check 'streaming bootstrap inert under cmd.exe gateway' ($out -match 'gw:\[rrun-gw-ok\]') $out
+  $out = $probeB64 | powershell.exe -NoProfile -c $remoteCmd 2>&1 | Out-String
+  Check 'streaming bootstrap inert under PowerShell 5.1 gateway' ($out -match 'gw:\[rrun-gw-ok\]') $out
+  if (Get-Command pwsh -ErrorAction SilentlyContinue) {
+    $out = $probeB64 | pwsh -NoProfile -c $remoteCmd 2>&1 | Out-String
+    Check 'streaming bootstrap inert under pwsh 7 gateway' ($out -match 'gw:\[rrun-gw-ok\]') $out
+  } else { Write-Host '  SKIP  pwsh not installed' }
+} else {
+  Check 'dry-run parse for gateway emulation' $false $dry
+}
+
 Write-Host '[core regression suite (mocked ssh, in WSL)]'
 wsl.exe -e bash (ToWslPath (Join-Path $repo 'tests\core-tests.sh'))
 Check 'tests/core-tests.sh all pass' ($LASTEXITCODE -eq 0)
