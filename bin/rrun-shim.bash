@@ -26,7 +26,9 @@
 #          payloads exit non-zero (the & operator otherwise masked failures);
 #          v1.5 BOM-detecting decode (UTF-16LE .ps1 files no longer garbage),
 #          size-limit doc corrected to ~9KB; v1.6 status-honest local bash/sh
-#          decode (broken base64 -> loud 125, not silent success).
+#          decode (broken base64 -> loud 125, not silent success); v1.7
+#          file-backed decode — execution byte-for-byte ($(...) stripped
+#          trailing newlines, changing backslash-newline-final payloads).
 set -euo pipefail
 
 xlate() {  # absolute Windows path -> /mnt/<d>/... for WSL
@@ -83,9 +85,10 @@ if [[ $host == local ]]; then
     exec powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand "$b64"
   else
     b64=$pb64
-    # status-honest decode (see core v2.3.3): the old pipeline reported the
-    # shell's status, so a broken base64 meant silent success. 125 = decode fail.
-    run="s=\$(echo $b64 | base64 -d) || { echo rrun: local decode failed >&2; exit 125; }; exec $shell -c \"\$s\""
+    # file-backed status-honest decode (see core v2.3.4): a plain pipeline hid
+    # decoder failures (silent success), and s=$(...) stripped trailing
+    # newlines at execution time. Temp file = exact bytes + honest status.
+    run="t=\$(mktemp) || exit 125; echo $b64 | base64 -d > \"\$t\" || { rm -f \"\$t\"; echo rrun: local decode failed >&2; exit 125; }; $shell \"\$t\"; r=\$?; rm -f \"\$t\"; exit \$r"
     if (( dry )); then
       printf 'wsl -e bash -c %q\n' "$run"
       exit 0

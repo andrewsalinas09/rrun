@@ -16,8 +16,9 @@
 #   * STREAMED bash/sh payloads cannot read stdin (the channel carries the
 #     payload). Non-streamed bash/sh payloads read the real ssh channel as of
 #     v2.3.3 (they used to read their own script text from the decode pipe).
-#   * exit 125 = the transport itself failed to decode the payload remotely
-#     (e.g. no base64 on the target) — distinct from any payload exit code.
+#   * payload exit codes pass through UNTOUCHED — rrun reserves nothing. A
+#     transport-level decode failure exits 125 AND prints "rrun: ... decode
+#     failed" on stderr; the stderr marker (not the number) identifies it.
 #   * large payloads (composed command > RRUN_STREAM_LIMIT, default 6000 chars —
 #     sized for the 8191-char cmd.exe limit on stock Windows OpenSSH targets)
 #     auto-switch to streaming the base64 over stdin; the remote payload then
@@ -68,6 +69,14 @@
 #                 payload's own exit code is what rrun returns. (b) streamed
 #                 sends judged by PIPESTATUS[1] (ssh) — local printf SIGPIPE
 #                 (141) after an early remote exit is not a failure.
+#   v2.3.4 2026-08-10 execution is byte-for-byte again: v2.3.3's s=$(...)
+#                 decode stripped trailing newlines AT EXECUTION (a payload
+#                 ending in backslash-newline changed behavior) — the same
+#                 class v2.3.0 fixed on the sender side, recreated on the
+#                 receiver. Embedded bash/sh decode is now file-backed (like
+#                 streaming), keeping exact bytes + honest decoder status +
+#                 real stdin. Also: no exit code is reserved — transparency;
+#                 the stderr marker identifies transport decode failures.
 #   v2.2.1 2026-08-10 streaming ps bootstrap now travels as -EncodedCommand:
 #                 the bare "-Command iex(...)" form was re-parsed when the remote
 #                 sshd DefaultShell was PowerShell (outer shell evaluated the
@@ -137,16 +146,19 @@ case "$shell" in
     ;;
   bash|sh)
     b64=$payload_b64
-    # Two-step decode -> exec, NOT `echo b64 | base64 -d | shell`: without
+    # File-backed decode -> run, NOT `echo b64 | base64 -d | shell`: without
     # pipefail (unavailable in a POSIX login shell) that pipeline reports the
     # SHELL's status, so a missing/broken remote base64 fed EOF to the shell and
-    # rrun exited 0 while the payload NEVER RAN. $(...) surfaces the decoder's
-    # own status; exit 125 = transport decode failure, distinct from payload
-    # codes. The `sh -c '...'` outer wrap keeps the one-liner working even when
-    # the remote login shell is csh/fish (they can't parse s=$(...) directly).
-    # Side effect (documented): non-streamed payloads now read the real stdin
-    # (the ssh channel), not their own script text from the decode pipe.
-    cmd="sh -c 's=\$(echo $b64 | base64 -d) || { echo rrun: remote decode failed >&2; exit 125; }; exec $shell -c \"\$s\"'"
+    # rrun exited 0 while the payload NEVER RAN. And NOT `s=$(...); shell -c "$s"`:
+    # command substitution strips trailing newlines, silently changing payloads
+    # that end in backslash-newline — execution must be byte-for-byte, like the
+    # transport. A temp file gives all three at once: exact bytes, an honest
+    # decoder status, and the payload keeping the REAL stdin (the ssh channel).
+    # The `sh -c '...'` outer wrap keeps the one-liner parseable even when the
+    # remote login shell is csh/fish. The payload's own exit code passes through
+    # untouched — rrun reserves nothing; its own decode failure exits 125 AND
+    # prints the stderr marker, which is what identifies it as transport-level.
+    cmd="sh -c 't=\$(mktemp) || exit 125; echo $b64 | base64 -d > \"\$t\" || { rm -f \"\$t\"; echo rrun: remote decode failed >&2; exit 125; }; $shell \"\$t\"; r=\$?; rm -f \"\$t\"; exit \$r'"
     ;;
   *) echo "rrun: -s must be ps, bash or sh (got '$shell')" >&2; exit 2 ;;
 esac
@@ -200,8 +212,10 @@ fi
 # originating from an inner layer, so quoting never stacks.
 for ((i=${#hops[@]}-2; i>=0; i--)); do
   b=$(printf %s "$cmd" | base64 -w0)
-  # hop decode uses the same status-honest two-step (no single quotes inside —
-  # the layer itself is single-quoted). Hop login shells must be POSIX-capable.
+  # hop decode keeps the status-honest $(...) form (no single quotes inside —
+  # the layer itself is single-quoted). Trailing-newline stripping is harmless
+  # HERE because the decoded text is rrun's own generated one-line ssh command,
+  # never user payload bytes. Hop login shells must be POSIX-capable.
   cmd="ssh -o BatchMode=yes ${hops[i+1]} 's=\$(echo $b | base64 -d) || { echo rrun: hop decode failed >&2; exit 125; }; exec bash -c \"\$s\"'"
 done
 

@@ -39,9 +39,9 @@ check 'multi-hop dry-run composes' $?
 payload='tricky "double\" $dollar `backtick` | ; & payload'
 PATH="$stubpath" "$RRUN" -s bash examplehost -c "$payload" < /dev/null
 argv
-b64=$(sed -n 's/.*s=\$(echo \([A-Za-z0-9+/=]*\) | base64 -d).*/\1/p' <<<"${ARGV[-1]}")
-[[ -n $b64 && $(printf %s "$b64" | base64 -d) == "$payload" && ${ARGV[-1]} == "sh -c 's="* && ${ARGV[-1]} == *'exec bash -c "$s"'* ]]
-check 'bash payload survives armoring byte-for-byte (status-honest two-step)' $?
+b64=$(sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' <<<"${ARGV[-1]}")
+[[ -n $b64 && $(printf %s "$b64" | base64 -d) == "$payload" && ${ARGV[-1]} == "sh -c 't="* && ${ARGV[-1]} == *'base64 -d > '* ]]
+check 'bash payload survives armoring byte-for-byte (file-backed decode)' $?
 
 # REGRESSION: the transport's exit status must be the EXECUTOR's, never an
 # accident of the decode pipeline. A broken/missing remote base64 used to feed
@@ -61,6 +61,20 @@ check 'broken remote base64 -> loud exit 125, payload never runs' $?
 out=$(sh -c "$remote_cmd" 2>/dev/null </dev/null); rc=$?
 [[ $rc == 7 && $out == 'x-ran-x' ]]
 check 'healthy transport surfaces payload output and exit code (7)' $?
+
+# REGRESSION: EXECUTION must be byte-for-byte, not just transport. A $(...)
+# decode strips trailing newlines, so a payload ending in backslash-newline
+# (a line continuation) turned into a trailing literal backslash and changed
+# behavior: `printf '<%s>\n' \` + EOF prints <> as a file but <\> after
+# stripping. Execute the real composed command and demand the file semantics.
+cat > "$work/cont.sh" <<'EOF'
+printf '<%s>\n' \
+EOF
+PATH="$stubpath" "$RRUN" -s bash examplehost "$work/cont.sh" < /dev/null
+argv
+out=$(sh -c "${ARGV[-1]}" 2>/dev/null </dev/null); rc=$?
+[[ $rc == 0 && $out == '<>' ]]
+check 'trailing backslash-newline payload executes byte-for-byte (<> not <\>)' $?
 
 PATH="$stubpath" "$RRUN" examplehost -c 'Get-Date # metachars $x "y"' < /dev/null
 argv
@@ -96,7 +110,7 @@ check 'ps file payload byte-for-byte: using/param first lines, trailing newlines
 printf 'echo ok\n\n\n' > "$work/payload.sh"
 PATH="$stubpath" "$RRUN" -s bash examplehost "$work/payload.sh" < /dev/null
 argv
-sed -n 's/.*s=\$(echo \([A-Za-z0-9+/=]*\) | base64 -d).*/\1/p' <<<"${ARGV[-1]}" | tr -d '\n' | base64 -d > "$work/decoded"
+sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' <<<"${ARGV[-1]}" | tr -d '\n' | base64 -d > "$work/decoded"
 cmp -s "$work/payload.sh" "$work/decoded"
 check 'bash file payload byte-for-byte: trailing newlines preserved' $?
 
@@ -104,7 +118,7 @@ PATH="$stubpath" "$RRUN" -s bash h1,h2 -c 'echo deep' < /dev/null
 argv
 inner_b64=$(sed -n "s/^ssh -o BatchMode=yes h2 's=\$(echo \([A-Za-z0-9+/=]*\) | base64 -d).*/\1/p" <<<"${ARGV[-1]}")
 layer=$(printf %s "$inner_b64" | base64 -d)
-b64=$(sed -n 's/.*s=\$(echo \([A-Za-z0-9+/=]*\) | base64 -d).*/\1/p' <<<"$layer")
+b64=$(sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' <<<"$layer")
 [[ $(printf %s "$b64" | base64 -d) == 'echo deep' ]]
 check 'multi-hop unwraps layer-by-layer to original payload' $?
 

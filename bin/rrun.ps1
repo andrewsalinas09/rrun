@@ -23,7 +23,9 @@
 #          v1.6 remote dry-run prints a stderr notice that the output is
 #          bash-quoted (not PowerShell paste-safe); ~9KB size doc fix;
 #          v1.7 status-honest local bash/sh decode (broken base64 -> loud
-#          125, not silent success).
+#          125, not silent success); v1.8 file-backed decode — execution
+#          byte-for-byte ($(...) stripped trailing newlines, changing
+#          backslash-newline-final payloads).
 $ErrorActionPreference = 'Stop'
 
 function Fail([string]$msg) {
@@ -90,9 +92,10 @@ if ($hostSpec -eq 'local') {
     exit $LASTEXITCODE
   } else {
     $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
-    # status-honest decode (see core v2.3.3): the old pipeline reported the
-    # shell's status, so a broken base64 meant silent success. 125 = decode fail.
-    $run = 's=$(echo ' + $b64 + ' | base64 -d) || { echo rrun: local decode failed >&2; exit 125; }; exec ' + $shell + ' -c "$s"'
+    # file-backed status-honest decode (see core v2.3.4): a plain pipeline hid
+    # decoder failures (silent success), and s=$(...) stripped trailing
+    # newlines at execution time. Temp file = exact bytes + honest status.
+    $run = 't=$(mktemp) || exit 125; echo ' + $b64 + ' | base64 -d > "$t" || { rm -f "$t"; echo rrun: local decode failed >&2; exit 125; }; ' + $shell + ' "$t"; r=$?; rm -f "$t"; exit $r'
     if ($dry) { Write-Output "wsl -e bash -c `"$run`""; exit 0 }
     & wsl.exe -e bash -c $run
     exit $LASTEXITCODE
