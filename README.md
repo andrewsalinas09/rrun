@@ -81,7 +81,7 @@ echo 'uname -a' | rrun -s bash pi -        # payload from stdin
 
 ## Install
 
-**Humans**: clone, then in PowerShell run `.\install.ps1`. Re-run any time; it's idempotent.
+**Humans**: clone, then in PowerShell run `.\install.ps1`. Re-run any time; it's idempotent. Verify with `.\test.ps1` — 11 checks needing no remote host (dry-run composition through every entry point, real execution via `local` mode, CLIXML cleanliness, `$(subst)` survival); add `-TargetHost <host>` for a real ssh round-trip.
 
 **Claude / AI agents**: point the agent at this repo and say "install this" — `CLAUDE.md` contains the exact steps and post-install rules of engagement.
 

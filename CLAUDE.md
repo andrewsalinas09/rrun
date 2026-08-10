@@ -25,6 +25,15 @@ On a pure-Linux machine: copy `bin/rrun` to `~/.local/bin/`, `chmod +x` — done
 - The Windows Bash tool is Git Bash (MSYS): it mangles POSIX-looking args to native exes. The installed `wsl`/`adb` wrappers handle those two; prefix `MSYS_NO_PATHCONV=1` for others.
 - **RSI rule**: when a failure belongs to a class this tool was built to eliminate, fix the tool (and note it in the file header + commit), not just the instance.
 
+## 3. RSI loop — how changes to this tool happen
+
+When a shell-boundary failure reveals a case rrun doesn't cover, fix the **class** here, never the instance inline:
+
+1. Edit the repo sources (`bin/`, `profile/`) — installed copies are build artifacts, never hand-edit them.
+2. `& install.ps1` (deploys + self-verifies) then `& test.ps1` (pass `-TargetHost <host>` when a real ssh host is available). Both must be clean.
+3. Update the file-header history comment and README changelog; bump the version.
+4. Commit with a message naming the failure that motivated the change, and push.
+
 ## Repo conventions
 
 - `bin/rrun` and `bin/rrun-shim.bash` MUST keep LF endings (enforced via .gitattributes); CRLF breaks them at runtime.
