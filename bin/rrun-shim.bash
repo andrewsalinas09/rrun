@@ -25,7 +25,8 @@
 #          v1.4 wrapper appends `if (-not $?) { exit 1 }` so failing local ps
 #          payloads exit non-zero (the & operator otherwise masked failures);
 #          v1.5 BOM-detecting decode (UTF-16LE .ps1 files no longer garbage),
-#          size-limit doc corrected to ~9KB.
+#          size-limit doc corrected to ~9KB; v1.6 status-honest local bash/sh
+#          decode (broken base64 -> loud 125, not silent success).
 set -euo pipefail
 
 xlate() {  # absolute Windows path -> /mnt/<d>/... for WSL
@@ -82,11 +83,14 @@ if [[ $host == local ]]; then
     exec powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand "$b64"
   else
     b64=$pb64
+    # status-honest decode (see core v2.3.3): the old pipeline reported the
+    # shell's status, so a broken base64 meant silent success. 125 = decode fail.
+    run="s=\$(echo $b64 | base64 -d) || { echo rrun: local decode failed >&2; exit 125; }; exec $shell -c \"\$s\""
     if (( dry )); then
-      printf 'wsl -e bash -c %q\n' "echo $b64 | base64 -d | $shell"
+      printf 'wsl -e bash -c %q\n' "$run"
       exit 0
     fi
-    exec env MSYS_NO_PATHCONV=1 wsl.exe -e bash -c "echo $b64 | base64 -d | $shell"
+    exec env MSYS_NO_PATHCONV=1 wsl.exe -e bash -c "$run"
   fi
 fi
 

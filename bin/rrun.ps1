@@ -21,7 +21,9 @@
 #          `if (-not $?) { exit 1 }` so failing local ps payloads exit non-zero
 #          (the & operator otherwise swallowed the failure -> false success);
 #          v1.6 remote dry-run prints a stderr notice that the output is
-#          bash-quoted (not PowerShell paste-safe); ~9KB size doc fix.
+#          bash-quoted (not PowerShell paste-safe); ~9KB size doc fix;
+#          v1.7 status-honest local bash/sh decode (broken base64 -> loud
+#          125, not silent success).
 $ErrorActionPreference = 'Stop'
 
 function Fail([string]$msg) {
@@ -88,8 +90,11 @@ if ($hostSpec -eq 'local') {
     exit $LASTEXITCODE
   } else {
     $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
-    if ($dry) { Write-Output "wsl -e bash -c `"echo $b64 | base64 -d | $shell`""; exit 0 }
-    & wsl.exe -e bash -c "echo $b64 | base64 -d | $shell"
+    # status-honest decode (see core v2.3.3): the old pipeline reported the
+    # shell's status, so a broken base64 meant silent success. 125 = decode fail.
+    $run = 's=$(echo ' + $b64 + ' | base64 -d) || { echo rrun: local decode failed >&2; exit 125; }; exec ' + $shell + ' -c "$s"'
+    if ($dry) { Write-Output "wsl -e bash -c `"$run`""; exit 0 }
+    & wsl.exe -e bash -c $run
     exit $LASTEXITCODE
   }
 }

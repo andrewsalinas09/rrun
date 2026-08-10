@@ -28,11 +28,12 @@ function ToWslPath([string]$p) {
 # LOUD failure, never a silently hung suite: WSL `timeout` maps a wedge to exit
 # 124, we sweep the stuck remote process, and retry.
 function Invoke-RrunStreamTimed([string]$RemoteHost, [string]$File, [int]$TimeoutSec = 60) {
-  $cmd = 'timeout {0} "$HOME/.local/bin/rrun" {1} "{2}" 2>&1' -f $TimeoutSec, $RemoteHost, (ToWslPath $File)
+  # host/path ride as positional args ($1..$3), never interpolated into the
+  # bash source — the same payload-as-data rule the tool itself enforces.
   # PS-side 2>&1 is REQUIRED in addition to the bash-side one: remote error text
   # arrives as a "#< CLIXML" stream, which PowerShell deserializes and re-routes
   # to its error stream — without this merge it vanishes from the capture.
-  $out = wsl.exe -e bash -c $cmd 2>&1 | Out-String
+  $out = wsl.exe -e bash -c 'timeout "$1" "$HOME/.local/bin/rrun" "$2" "$3" 2>&1' rrun-timed $TimeoutSec $RemoteHost (ToWslPath $File) 2>&1 | Out-String
   @{ Out = $out; Exit = $LASTEXITCODE }
 }
 # PS 5.1-safe sweep: kill wedged EncodedCommand powershell.exe instances (old

@@ -39,9 +39,28 @@ check 'multi-hop dry-run composes' $?
 payload='tricky "double\" $dollar `backtick` | ; & payload'
 PATH="$stubpath" "$RRUN" -s bash examplehost -c "$payload" < /dev/null
 argv
-b64=$(sed -n 's/^echo \([A-Za-z0-9+/=]*\) | base64 -d | bash$/\1/p' <<<"${ARGV[-1]}")
-[[ -n $b64 && $(printf %s "$b64" | base64 -d) == "$payload" ]]
-check 'bash payload survives armoring byte-for-byte' $?
+b64=$(sed -n 's/.*s=\$(echo \([A-Za-z0-9+/=]*\) | base64 -d).*/\1/p' <<<"${ARGV[-1]}")
+[[ -n $b64 && $(printf %s "$b64" | base64 -d) == "$payload" && ${ARGV[-1]} == "sh -c 's="* && ${ARGV[-1]} == *'exec bash -c "$s"'* ]]
+check 'bash payload survives armoring byte-for-byte (status-honest two-step)' $?
+
+# REGRESSION: the transport's exit status must be the EXECUTOR's, never an
+# accident of the decode pipeline. A broken/missing remote base64 used to feed
+# EOF to the shell -> exit 0 with the payload NEVER RUN. Execute the real
+# composed command locally with a sabotaged base64: loud 125, nothing runs.
+PATH="$stubpath" "$RRUN" -s bash examplehost -c 'echo x-ran-x; exit 7' < /dev/null
+argv
+remote_cmd=${ARGV[-1]}
+mkdir -p "$work/badbin"
+printf '#!/bin/sh\necho base64: broken >&2\nexit 1\n' > "$work/badbin/base64"
+chmod +x "$work/badbin/base64"
+out=$(PATH="$work/badbin:$PATH" sh -c "$remote_cmd" 2>"$work/err"); rc=$?
+[[ $rc == 125 && $out != *x-ran-x* ]] && grep -q 'decode failed' "$work/err"
+check 'broken remote base64 -> loud exit 125, payload never runs' $?
+
+# ...and with a healthy decoder the payload's own output AND exit code surface
+out=$(sh -c "$remote_cmd" 2>/dev/null </dev/null); rc=$?
+[[ $rc == 7 && $out == 'x-ran-x' ]]
+check 'healthy transport surfaces payload output and exit code (7)' $?
 
 PATH="$stubpath" "$RRUN" examplehost -c 'Get-Date # metachars $x "y"' < /dev/null
 argv
@@ -77,23 +96,40 @@ check 'ps file payload byte-for-byte: using/param first lines, trailing newlines
 printf 'echo ok\n\n\n' > "$work/payload.sh"
 PATH="$stubpath" "$RRUN" -s bash examplehost "$work/payload.sh" < /dev/null
 argv
-sed -n 's/^echo \([A-Za-z0-9+/=]*\) | base64 -d | bash$/\1/p' <<<"${ARGV[-1]}" | tr -d '\n' | base64 -d > "$work/decoded"
+sed -n 's/.*s=\$(echo \([A-Za-z0-9+/=]*\) | base64 -d).*/\1/p' <<<"${ARGV[-1]}" | tr -d '\n' | base64 -d > "$work/decoded"
 cmp -s "$work/payload.sh" "$work/decoded"
 check 'bash file payload byte-for-byte: trailing newlines preserved' $?
 
 PATH="$stubpath" "$RRUN" -s bash h1,h2 -c 'echo deep' < /dev/null
 argv
-inner_b64=$(sed -n "s/^ssh -o BatchMode=yes h2 'echo \([A-Za-z0-9+/=]*\) | base64 -d | bash'$/\1/p" <<<"${ARGV[-1]}")
+inner_b64=$(sed -n "s/^ssh -o BatchMode=yes h2 's=\$(echo \([A-Za-z0-9+/=]*\) | base64 -d).*/\1/p" <<<"${ARGV[-1]}")
 layer=$(printf %s "$inner_b64" | base64 -d)
-b64=$(sed -n 's/^echo \([A-Za-z0-9+/=]*\) | base64 -d | bash$/\1/p' <<<"$layer")
+b64=$(sed -n 's/.*s=\$(echo \([A-Za-z0-9+/=]*\) | base64 -d).*/\1/p' <<<"$layer")
 [[ $(printf %s "$b64" | base64 -d) == 'echo deep' ]]
 check 'multi-hop unwraps layer-by-layer to original payload' $?
 
 echo '[streaming]'
 RRUN_STREAM_LIMIT=10 PATH="$stubpath" "$RRUN" -s bash examplehost -c 'echo big-payload' < /dev/null
 argv
-[[ ${ARGV[-1]} == 'base64 -d | bash' && $(base64 -d < "$STUB_OUT.stdin") == 'echo big-payload' ]]
-check 'large bash payload streams over stdin' $?
+[[ ${ARGV[-1]} == "sh -c 't="* && ${ARGV[-1]} == *'base64 -d > '* && ${ARGV[-1]} == *'exit 125'* && $(base64 -d < "$STUB_OUT.stdin") == 'echo big-payload' ]]
+check 'large bash payload streams over stdin (status-honest tempfile decode)' $?
+
+# REGRESSION: rrun's streamed exit code is ssh's, not the send pipeline's.
+# A remote script that exits before draining stdin SIGPIPEs the local printf
+# (141); under pipefail that reported failure for a SUCCESSFUL remote run.
+# Stub ssh that never reads stdin + a payload whose base64 (~133KB) exceeds the
+# 64KB pipe buffer (payload itself stays under the 128KB per-arg exec limit).
+mkdir -p "$work/bin-noread"
+cat > "$work/bin-noread/ssh" <<'STUB2'
+#!/usr/bin/env bash
+exit 0
+STUB2
+chmod +x "$work/bin-noread/ssh"
+bigpad=$(head -c 100000 /dev/zero | tr '\0' 'x')
+RRUN_STREAM_LIMIT=10 PATH="$work/bin-noread:$PATH" "$RRUN" -s bash examplehost -c "echo start # $bigpad" < /dev/null
+rc=$?
+[[ $rc == 0 ]]
+check 'streamed exit code is ssh element alone (printf SIGPIPE is not failure)' $?
 
 RRUN_STREAM_LIMIT=10 PATH="$stubpath" "$RRUN" examplehost -c 'Get-BigThing' < /dev/null
 argv
