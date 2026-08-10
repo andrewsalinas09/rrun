@@ -81,6 +81,10 @@
 #                 so an interrupted wrapper never leaves the decoded payload
 #                 (possibly containing secrets) behind on the target. Final
 #                 bash/sh targets need mktemp+rm (documented).
+#   v2.3.6 2026-08-10 hostspec structure validated before splitting: empty
+#                 host crashed under set -u (unbound ${hops[0]}) instead of a
+#                 clean exit 2, and a trailing comma ("h1,") was silently
+#                 accepted because read -a drops trailing empty fields.
 #   v2.2.1 2026-08-10 streaming ps bootstrap now travels as -EncodedCommand:
 #                 the bare "-Command iex(...)" form was re-parsed when the remote
 #                 sshd DefaultShell was PowerShell (outer shell evaluated the
@@ -162,14 +166,22 @@ case "$shell" in
     # remote login shell is csh/fish. The payload's own exit code passes through
     # untouched — rrun reserves nothing; its own decode failure exits 125 AND
     # prints the stderr marker, which is what identifies it as transport-level.
-    # Traps (EXIT + HUP/INT/TERM) guarantee the decoded payload file never
-    # outlives an interrupted wrapper; the EXIT trap does not alter the exit
-    # status, so the executor's code still passes through.
+    # Traps clean the decoded payload file up on normal exit and on catchable
+    # HUP/INT/TERM (SIGKILL and host crashes can't be trapped); the EXIT trap
+    # does not alter the exit status, so the executor's code passes through.
     cmd="sh -c 't=\$(mktemp) || exit 125; trap \"rm -f \\\"\$t\\\"\" 0; trap exit 1 2 15; echo $b64 | base64 -d > \"\$t\" || { echo rrun: remote decode failed >&2; exit 125; }; $shell \"\$t\"'"
     ;;
   *) echo "rrun: -s must be ps, bash or sh (got '$shell')" >&2; exit 2 ;;
 esac
 
+# Structural validation BEFORE splitting: `read -a` silently discards a
+# trailing empty field (so "h1," passed as just h1), and an empty hostspec
+# produced a zero-element array that later crashed on ${hops[0]} under set -u
+# instead of exiting 2 with a real message.
+if [[ ! $hostspec =~ ^[^,]+(,[^,]+)*$ ]]; then
+  echo "rrun: invalid host spec '$hostspec' (need host[,hop2,...], no empty components)" >&2
+  exit 2
+fi
 IFS=, read -ra hops <<<"$hostspec"
 # Hop tokens are the ONE thing interpolated into intermediate shell commands
 # (the payload itself is always armored) — so they must be plain host tokens.
@@ -206,9 +218,9 @@ if (( ${#hops[@]} == 1 && ${#cmd} > limit )); then
       ;;
     *)
       # streamed: payload arrives on stdin, so it can't ride argv — decode to a
-      # temp file, check the decoder's status, run, clean up (trap-guaranteed),
-      # and pass the payload's own exit code through. Same decode-failure
-      # contract (exit 125 + stderr marker).
+      # temp file, check the decoder's status, run, clean up (trap on exit and
+      # catchable signals), and pass the payload's own exit code through. Same
+      # decode-failure contract (exit 125 + stderr marker).
       cmd="sh -c 't=\$(mktemp) || exit 125; trap \"rm -f \\\"\$t\\\"\" 0; trap exit 1 2 15; base64 -d > \"\$t\" || { echo rrun: remote decode failed >&2; exit 125; }; $shell \"\$t\"'"
       ;;
   esac

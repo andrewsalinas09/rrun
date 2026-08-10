@@ -183,6 +183,15 @@ check 'oversized ps payload on nested hops fails fast, advises -J' $?
 echo '[validation]'
 "$RRUN" -s bash 'h1;rm -rf /' -c x 2>/dev/null; [[ $? == 2 ]]
 check 'metacharacter host token rejected' $?
+# REGRESSION: structural hostspec validation must run BEFORE splitting — an
+# empty host crashed under set -u (unbound ${hops[0]}) instead of exiting 2,
+# and "h1," was silently accepted (read -a drops trailing empty fields).
+"$RRUN" '' -c x 2>/dev/null; [[ $? == 2 ]]
+check 'empty host spec rejected (exit 2, not a set -u crash)' $?
+"$RRUN" -s bash 'h1,' -c x 2>/dev/null; [[ $? == 2 ]]
+check 'trailing-comma host spec rejected' $?
+"$RRUN" -s bash 'h1,,h2' -c x 2>/dev/null; [[ $? == 2 ]]
+check 'empty hop component rejected' $?
 "$RRUN" -- -oProxyCommand=evil -c x 2>/dev/null; [[ $? == 2 ]]
 check 'option-shaped host token (leading -) rejected' $?
 "$RRUN" -s bash 'h1,-V' -c x 2>/dev/null; [[ $? == 2 ]]

@@ -40,6 +40,17 @@ $rawBytes = [byte[]](0xFF, 0xFE, 0x68, 0x69, 0x0A, 0x00, 0xE9, 0x0D, 0x0A, 0x0A,
 $dry = & $shim -n -s bash local $rawFile 2>&1 | Out-String
 $m = [regex]::Match($dry, 'echo ([A-Za-z0-9+/=]+) \| base64')
 Check 'REGRESSION: bash file operand rides as raw bytes (b64 == file bytes)' ($m.Success -and ($m.Groups[1].Value -eq [Convert]::ToBase64String($rawBytes))) $dry.Trim()
+
+# ...and stdin (-) must be raw bytes too — it was the last text-typed ingestion
+# path (Console.In.ReadToEnd re-encoded UTF-16/binary stdin as UTF-8). cmd.exe's
+# `<` hands the child the raw file handle; a PowerShell pipe would re-encode.
+# -Command (not -File): powershell.exe -File tries to bind a bare `-` as a
+# parameter name and dies before the script runs; in-language invocation is the
+# canonical entry (PATH-resolved `rrun`) and parses `-` as a plain argument.
+$cmdLine = 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& ''{0}'' -n -s bash local -" < "{1}"' -f $shim, $rawFile
+$dry = cmd /c $cmdLine 2>&1 | Out-String
+$m = [regex]::Match($dry, 'echo ([A-Za-z0-9+/=]+) \| base64')
+Check 'REGRESSION: stdin (-) rides as raw bytes (b64 == piped bytes)' ($m.Success -and ($m.Groups[1].Value -eq [Convert]::ToBase64String($rawBytes))) $dry.Trim()
 Remove-Item $rawFile -ErrorAction SilentlyContinue
 
 $out = & $shim -n local -c 'Write-Output SHOULD-NOT-RUN' 2>&1 | Out-String

@@ -27,7 +27,9 @@
 #          byte-for-byte ($(...) stripped trailing newlines, changing
 #          backslash-newline-final payloads); v1.9 file operands read as RAW
 #          BYTES (ReadAllText BOM-decoded + UTF-8 re-encoded bash/sh files —
-#          text preservation, not bytes) + cleanup traps on the temp file.
+#          text preservation, not bytes) + cleanup traps on the temp file;
+#          v1.10 stdin (-) is raw process stdin bytes too (last text-typed
+#          ingestion path; Console.In re-encoded UTF-16/binary stdin).
 $ErrorActionPreference = 'Stop'
 
 function Fail([string]$msg) {
@@ -75,7 +77,16 @@ if ($hostSpec -eq 'local') {
       if ($rest.Count -lt 2) { Fail 'rrun: -c needs a command string' }
       $payload = $rest[1]
     }
-    '-'  { $payload = [Console]::In.ReadToEnd() }
+    '-'  {
+      # `-` means RAW PROCESS STDIN, byte-for-byte (matching the core, which
+      # pipes stdin straight into base64). Console.In.ReadToEnd() decoded to a
+      # .NET string and re-encoded as UTF-8, transforming UTF-16/legacy/binary
+      # stdin. PowerShell object-pipeline input is deliberately NOT what `-`
+      # means — that would compromise byte semantics.
+      $ms = New-Object IO.MemoryStream
+      [Console]::OpenStandardInput().CopyTo($ms)
+      $payloadBytes = $ms.ToArray()
+    }
     default {
       # file operands ride as RAW BYTES. ReadAllText would BOM-decode and later
       # re-encode as UTF-8 — text preservation, not byte preservation: a
@@ -110,8 +121,8 @@ if ($hostSpec -eq 'local') {
            else { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload)) }
     # file-backed status-honest decode (see core v2.3.5): a plain pipeline hid
     # decoder failures (silent success), s=$(...) stripped trailing newlines at
-    # execution time, and the traps guarantee the decoded payload never
-    # outlives an interrupted wrapper. Exit status = the executor's own.
+    # execution time, and the traps clean the decoded payload up on normal exit
+    # and catchable signals. Exit status = the executor's own.
     $run = 't=$(mktemp) || exit 125; trap "rm -f \"$t\"" 0; trap exit 1 2 15; echo ' + $b64 + ' | base64 -d > "$t" || { echo rrun: local decode failed >&2; exit 125; }; ' + $shell + ' "$t"'
     if ($dry) { Write-Output "wsl -e bash -c `"$run`""; exit 0 }
     & wsl.exe -e bash -c $run

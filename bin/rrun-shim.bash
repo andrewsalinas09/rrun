@@ -89,8 +89,8 @@ if [[ $host == local ]]; then
     b64=$pb64
     # file-backed status-honest decode (see core v2.3.5): a plain pipeline hid
     # decoder failures (silent success), s=$(...) stripped trailing newlines at
-    # execution time, and the traps guarantee the decoded payload never
-    # outlives an interrupted wrapper. Exit status = the executor's own.
+    # execution time, and the traps clean the decoded payload up on normal exit
+    # and catchable signals. Exit status = the executor's own.
     run="t=\$(mktemp) || exit 125; trap \"rm -f \\\"\$t\\\"\" 0; trap exit 1 2 15; echo $b64 | base64 -d > \"\$t\" || { echo rrun: local decode failed >&2; exit 125; }; $shell \"\$t\""
     if (( dry )); then
       printf 'wsl -e bash -c %q\n' "$run"
