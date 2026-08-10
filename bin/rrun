@@ -30,6 +30,15 @@
 #                 payloads (Windows 8191-char command-line ceiling), %q paste-safe
 #                 dry-run, host-token validation, -s validation, missing-optarg
 #                 errors, cat --, size guard on multi-hop ps targets.
+#   v2.2.1 2026-08-10 streaming ps bootstrap now travels as -EncodedCommand:
+#                 the bare "-Command iex(...)" form was re-parsed when the remote
+#                 sshd DefaultShell was PowerShell (outer shell evaluated the
+#                 subexpression itself and re-quoted the payload — silently
+#                 corrupting $-bearing statements; verified against a pwsh-shell
+#                 host). Encoded form is inert under cmd, PowerShell, and POSIX
+#                 shells alike. Also: host tokens may not start with '-' (would
+#                 parse as an ssh option), dry-run %q-quotes every ssh argv
+#                 element (a metachar ProxyJump arg printed unquoted before).
 set -euo pipefail
 
 shell="" jump="" dry=0
@@ -81,9 +90,11 @@ esac
 IFS=, read -ra hops <<<"$hostspec"
 # Hop tokens are the ONE thing interpolated into intermediate shell commands
 # (the payload itself is always armored) — so they must be plain host tokens.
+# A leading '-' is rejected separately: ssh would parse it as an option, not a
+# destination.
 for h in "${hops[@]}"; do
-  if [[ ! $h =~ ^[A-Za-z0-9._@:-]+$ ]]; then
-    echo "rrun: invalid host token '$h' (allowed: letters, digits, . _ @ : -)" >&2
+  if [[ $h == -* || ! $h =~ ^[A-Za-z0-9._@:-]+$ ]]; then
+    echo "rrun: invalid host token '$h' (allowed: letters, digits, . _ @ : -; no leading -)" >&2
     exit 2
   fi
 done
@@ -91,14 +102,22 @@ done
 # Large payloads: the full command (payload embedded) can blow past the remote
 # command-line limit — 8191 chars via cmd.exe on stock Windows OpenSSH. For a
 # single hop (incl. -J), switch to streaming the base64 over stdin behind a
-# small fixed bootstrap; the bootstrap contains no shell metacharacters beyond
-# what cmd.exe/powershell/bash all pass through literally.
+# small fixed bootstrap. The ps bootstrap itself rides as -EncodedCommand: the
+# remote sshd's shell may be cmd OR PowerShell (DefaultShell), and a bare
+# "-Command iex(...)" form gets re-parsed by an outer PowerShell (it evaluates
+# the parenthesized subexpression itself, then re-quotes the payload through a
+# second -Command layer — silently corrupting $-bearing statements). Base64 is
+# inert in every shell; that's the whole point of this tool.
 limit=${RRUN_STREAM_LIMIT:-6000}
 stream=0
 if (( ${#hops[@]} == 1 && ${#cmd} > limit )); then
   stream=1
   case "$shell" in
-    ps) cmd="powershell -NoProfile -ExecutionPolicy Bypass -Command iex([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd())))" ;;
+    ps)
+      boot='iex([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd())))'
+      bootb64=$(printf %s "$boot" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
+      cmd="powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $bootb64"
+      ;;
     *)  cmd="base64 -d | $shell" ;;
   esac
 fi
@@ -123,12 +142,14 @@ if [[ -n $jump ]]; then
 fi
 
 if (( dry )); then
-  # %q makes the printed command paste-safe: without it, "| base64 -d | bash"
-  # would execute LOCALLY if someone copied the dry-run output into a shell.
+  # %q on EVERY argv element makes the printed command paste-safe: the composed
+  # remote command ("| base64 -d | bash") would otherwise execute LOCALLY when
+  # pasted, and a metacharacter-bearing -J argument would do the same.
+  dryout=$(printf '%q ' ssh "${sshopts[@]}" "${hops[0]}" "$cmd")
   if (( stream )); then
-    printf 'printf %%s %s | ssh %s %s %q\n' "$b64" "${sshopts[*]}" "${hops[0]}" "$cmd"
+    printf 'printf %%s %s | %s\n' "$b64" "${dryout% }"
   else
-    printf 'ssh %s %s %q\n' "${sshopts[*]}" "${hops[0]}" "$cmd"
+    printf '%s\n' "${dryout% }"
   fi
   exit 0
 fi

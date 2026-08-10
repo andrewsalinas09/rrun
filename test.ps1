@@ -56,6 +56,8 @@ $payloadOut = & $shim -s bash local -c 'V=$(echo armored); echo "sub:$V"' 2>&1 |
 Check 'payload $(subst) and $VAR survive transport' ($payloadOut -match 'sub:armored')
 & $shim -s zsh examplehost -c 'x' 2>$null
 Check 'invalid -s rejected by shim' ($LASTEXITCODE -eq 2)
+& $shim local -c 2>$null
+Check 'REGRESSION: local -c with no command exits 2' ($LASTEXITCODE -eq 2)
 
 Write-Host '[installed: Git Bash shim]'
 $gitBash = "$env:ProgramFiles\Git\bin\bash.exe"
@@ -85,6 +87,19 @@ if ($TargetHost) {
     [IO.File]::WriteAllText($bigFile, ($lines -join "`n") + "`n")
     $out = & $shim -s $TargetShell $TargetHost $bigFile 2>&1 | Out-String
     Check 'large payload streams via stdin (real host)' ($out -match 'rrun-big-ok')
+  }
+  if ($TargetShell -eq 'ps') {
+    # REGRESSION: large ps payload over the streaming bootstrap, against a REAL
+    # Windows sshd — the shell behind sshd (cmd or PowerShell DefaultShell) must
+    # not re-parse the bootstrap or expand $-bearing payload statements. A bare
+    # "-Command iex(...)" bootstrap corrupted these on pwsh-DefaultShell hosts.
+    $lines = @('$marker = ''rrun-big-ps-ok''', 'Write-Output "got:[$marker]"') +
+      (1..400 | ForEach-Object { "# padding line $_ to push the payload well past the streaming threshold" })
+    $bigFile = Join-Path $tmpDir 'big-payload.ps1'
+    [IO.File]::WriteAllText($bigFile, ($lines -join "`n") + "`n")
+    $out = & $shim $TargetHost $bigFile 2>&1 | Out-String
+    Check 'large ps payload streams via stdin (real Windows host)' ($out -match 'got:\[rrun-big-ps-ok\]')
+    Check 'ps streaming payload not re-parsed by remote shell' ($out -notmatch 'not recognized|CommandNotFoundException')
   }
 }
 Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue

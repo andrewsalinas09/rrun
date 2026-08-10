@@ -67,8 +67,16 @@ check 'large bash payload streams over stdin' $?
 RRUN_STREAM_LIMIT=10 PATH="$stubpath" "$RRUN" examplehost -c 'Get-BigThing' < /dev/null
 argv
 decoded=$(base64 -d < "$STUB_OUT.stdin" | iconv -f UTF-16LE -t UTF-8)
-[[ ${ARGV[-1]} == *'FromBase64String([Console]::In.ReadToEnd())'* && $decoded == *Get-BigThing* ]]
+bootb64=$(sed -n 's/^powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand \([A-Za-z0-9+/=]*\)$/\1/p' <<<"${ARGV[-1]}")
+boot=$(printf %s "$bootb64" | base64 -d | iconv -f UTF-16LE -t UTF-8)
+[[ -n $bootb64 && $boot == *'FromBase64String([Console]::In.ReadToEnd())'* && $decoded == *Get-BigThing* ]]
 check 'large ps payload streams behind fixed bootstrap' $?
+
+# REGRESSION: the ps streaming bootstrap must be INERT in the remote sshd shell
+# (cmd, PowerShell via DefaultShell, or a POSIX sh). A bare "-Command iex(...)"
+# was re-parsed by a PowerShell DefaultShell, corrupting $-bearing payloads.
+[[ ${ARGV[-1]} =~ ^powershell\ -NoProfile\ -ExecutionPolicy\ Bypass\ -EncodedCommand\ [A-Za-z0-9+/=]+$ ]]
+check 'ps streaming bootstrap contains only shell-inert characters' $?
 
 RRUN_STREAM_LIMIT=10 "$RRUN" h1,h2 -c 'Get-Date' 2>"$work/err"; rc=$?
 [[ $rc == 2 ]] && grep -q 'use -J' "$work/err"
@@ -77,6 +85,13 @@ check 'oversized ps payload on nested hops fails fast, advises -J' $?
 echo '[validation]'
 "$RRUN" -s bash 'h1;rm -rf /' -c x 2>/dev/null; [[ $? == 2 ]]
 check 'metacharacter host token rejected' $?
+"$RRUN" -- -oProxyCommand=evil -c x 2>/dev/null; [[ $? == 2 ]]
+check 'option-shaped host token (leading -) rejected' $?
+"$RRUN" -s bash 'h1,-V' -c x 2>/dev/null; [[ $? == 2 ]]
+check 'option-shaped intermediate hop rejected' $?
+out=$("$RRUN" -n -J 'jump;evil' examplehost -c x)
+[[ $out == *'jump\;evil'* ]]
+check 'dry-run %q-quotes metachar -J argument (paste-safe)' $?
 "$RRUN" -s zsh examplehost -c x 2>/dev/null; [[ $? == 2 ]]
 check 'unknown -s rejected' $?
 "$RRUN" -s 2>/dev/null; [[ $? == 2 ]]

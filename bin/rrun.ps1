@@ -13,7 +13,8 @@
 # history: v1 2026-08-10 created from transcript-error audit; v1.1 $HOME trampoline,
 #          CLIXML suppression; v1.2 review fixes — -n honored in local mode (was
 #          EXECUTING on dry-run), -c args no longer path-translated, -s validated,
-#          -J rejected for host local.
+#          -J rejected for host local; v1.3 "local -c" with no command now exits 2
+#          (out-of-range $rest[1] was silently $null -> empty successful run).
 $ErrorActionPreference = 'Stop'
 
 function Fail([string]$msg) {
@@ -56,7 +57,10 @@ if ($hostSpec -eq 'local') {
   if ($jump) { Fail 'rrun: -J is meaningless with host "local"' }
   $src = $rest[0]
   switch ($src) {
-    '-c' { $payload = $rest[1] }
+    '-c' {
+      if ($rest.Count -lt 2) { Fail 'rrun: -c needs a command string' }
+      $payload = $rest[1]
+    }
     '-'  { $payload = [Console]::In.ReadToEnd() }
     default { $payload = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $src).Path) }
   }
