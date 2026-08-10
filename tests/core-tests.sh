@@ -176,9 +176,56 @@ check 'large ps payload streams behind fixed scriptblock bootstrap (with exit ep
 [[ ${ARGV[-1]} =~ ^powershell\ -NoProfile\ -ExecutionPolicy\ Bypass\ -EncodedCommand\ [A-Za-z0-9+/=]+$ ]]
 check 'ps streaming bootstrap contains only shell-inert characters' $?
 
-RRUN_STREAM_LIMIT=10 "$RRUN" h1,h2 -c 'Get-Date' 2>"$work/err"; rc=$?
+# Large ps payloads over nested hops used to fail fast ("use -J"); they now
+# stream through the chain like bash targets do. The bootstrap still rides as
+# -EncodedCommand so intermediate/gateway shells can't re-parse it.
+RRUN_STREAM_LIMIT=10 PATH="$stubpath" "$RRUN" h1,h2 -c 'Get-BigThing' < /dev/null; rc=$?
+argv
+inner=$(sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' <<<"${ARGV[-1]}" | base64 -d)
+[[ $rc == 0 && $inner =~ ^powershell\ -NoProfile\ -ExecutionPolicy\ Bypass\ -EncodedCommand\ [A-Za-z0-9+/=]+$ ]] &&
+  [[ $(base64 -d < "$STUB_OUT.stdin") == 'Get-BigThing' ]]
+check 'nested hops stream ps payloads too (no more -J-only limitation)' $?
+
+# The hard ceiling (RRUN_MAX_CMD) still fails fast with advice when even the
+# streamed form cannot be delivered — rather than leaking E2BIG from exec.
+RRUN_MAX_CMD=100 RRUN_STREAM_LIMIT=10 "$RRUN" -s bash h1,h2 -c 'x' 2>"$work/err"; rc=$?
 [[ $rc == 2 ]] && grep -q 'use -J' "$work/err"
-check 'oversized ps payload on nested hops fails fast, advises -J' $?
+check 'over the hard ceiling fails fast, advises -J' $?
+
+# REGRESSION: streaming must work at ANY hop count. It used to be single-hop
+# only, so a nested chain embedded the payload and re-armored it 4/3 per layer:
+# a ~74KB script at 2 hops blew past the LOCAL 128KiB execve ceiling and leaked
+# "Argument list too long". Each intermediate ssh forwards stdin, so the tiny
+# bootstrap can ride the chain instead.
+bigpayload="echo nested-stream-ok # $(head -c 74000 /dev/zero | tr '\0' 'x')"
+printf '%s\n' "$bigpayload" > "$work/bignest.sh"
+PATH="$stubpath" "$RRUN" -s bash h1,h2 "$work/bignest.sh" < /dev/null
+argv
+outer=${ARGV[-1]}
+# the outer element is the h1 layer: `ssh ... h2 's=$(echo <armored> | ...)'`
+inner_b64=$(sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' <<<"$outer")
+inner=$(printf %s "$inner_b64" | base64 -d)
+# outer command stays small (payload is NOT in it), the innermost layer reads
+# stdin, and the streamed bytes are the payload itself
+[[ ${#outer} -lt 4000 && $inner == *'base64 -d > '* && $inner != *"$bigpayload"* ]]
+check 'nested hops stream large payloads (outer command stays tiny)' $?
+cmp -s <(base64 -d < "$STUB_OUT.stdin") "$work/bignest.sh"
+check 'nested streamed payload arrives byte-for-byte on stdin' $?
+
+# REGRESSION: a non-numeric RRUN_STREAM_LIMIT hit bash arithmetic (which
+# recursively evaluates variable contents) instead of a clean diagnostic.
+RRUN_STREAM_LIMIT=abc "$RRUN" -s bash examplehost -c x 2>"$work/err"; rc=$?
+[[ $rc == 2 ]] && grep -q 'RRUN_STREAM_LIMIT' "$work/err"
+check 'non-numeric RRUN_STREAM_LIMIT rejected with a diagnostic' $?
+
+# REGRESSION: an explicitly empty -c is a valid no-op program (the core and
+# bash shim used ${2:?} and rejected it; the ps shim accepted it). Only a
+# MISSING argument is an error — rrun adds no semantics of its own.
+PATH="$stubpath" "$RRUN" -s bash examplehost -c '' < /dev/null; rc=$?
+argv
+b64=$(sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' <<<"${ARGV[-1]}")
+[[ $rc == 0 && -z $b64 ]]
+check "empty -c '' composes as a no-op program (only missing -c is an error)" $?
 
 echo '[validation]'
 "$RRUN" -s bash 'h1;rm -rf /' -c x 2>/dev/null; [[ $? == 2 ]]

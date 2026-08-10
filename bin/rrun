@@ -22,8 +22,8 @@
 #   * large payloads (composed command > RRUN_STREAM_LIMIT, default 6000 chars —
 #     sized for the 8191-char cmd.exe limit on stock Windows OpenSSH targets)
 #     auto-switch to streaming the base64 over stdin; the remote payload then
-#     cannot read stdin. Streaming needs a single hop — for big payloads through
-#     intermediaries use -J, which is still one ssh connection.
+#     cannot read stdin. Streaming works at ANY hop count (each intermediate
+#     ssh forwards stdin to the next), so nested chains carry big payloads too.
 #   * KNOWN ISSUE: streamed sessions to a Windows sshd can nondeterministically
 #     wedge remotely before the payload runs (host-side sshd/DefaultShell race,
 #     independent of rrun version and payload — see README caveats). Wrap in a
@@ -85,6 +85,17 @@
 #                 host crashed under set -u (unbound ${hops[0]}) instead of a
 #                 clean exit 2, and a trailing comma ("h1,") was silently
 #                 accepted because read -a drops trailing empty fields.
+#   v2.3.7 2026-08-10 NESTED STREAMING: streaming was single-hop only, so a
+#                 nested chain embedded the payload and re-armored it 4/3 per
+#                 layer — a ~74KB script at 2 hops hit the LOCAL 128KiB E2BIG
+#                 ceiling and leaked "Argument list too long" (verified on a
+#                 real 2-hop chain). Since each intermediate ssh forwards its
+#                 stdin onward, the streaming bootstrap now works at any hop
+#                 count; rrun composes both forms and picks by measuring the
+#                 finished OUTERMOST command. Also: RRUN_STREAM_LIMIT must be
+#                 numeric (arithmetic contexts evaluate contents), and an
+#                 explicitly empty -c is a valid no-op program (was rejected
+#                 by the core/bash shim, accepted by the ps shim).
 #   v2.2.1 2026-08-10 streaming ps bootstrap now travels as -EncodedCommand:
 #                 the bare "-Command iex(...)" form was re-parsed when the remote
 #                 sshd DefaultShell was PowerShell (outer shell evaluated the
@@ -119,7 +130,10 @@ src=$1
 # shell variable first would strip trailing newlines (command substitution
 # deletes them), breaking byte-for-byte payload preservation.
 case "$src" in
-  -c) payload_b64=$(printf %s "${2:?rrun: -c needs a command string}" | base64 -w0) ;;
+  # ${2?...} not ${2:?...}: an EXPLICITLY EMPTY command is a valid (no-op)
+  # program and must run like one — only a MISSING argument is an error. The
+  # shims accept empty too; rrun adds no semantics of its own.
+  -c) payload_b64=$(printf %s "${2?rrun: -c needs a command string}" | base64 -w0) ;;
   -)  payload_b64=$(base64 -w0) ;;
   *)  payload_b64=$(base64 -w0 < "$src") ;;
 esac
@@ -132,45 +146,7 @@ if [[ -z $shell ]]; then
 fi
 
 case "$shell" in
-  ps)
-    # The payload text is never touched: prepending a statement broke param()/
-    # using payloads (they must be a script's FIRST statements). Instead a fixed
-    # wrapper sets ProgressPreference (else EncodedCommand with redirected
-    # stderr spews "#< CLIXML ... Preparing modules" progress records) and runs
-    # the decoded source as its own scriptblock, preserving its lexical start.
-    # The epilogue ("if (-not $?) { exit 1 }") is appended INSIDE the scriptblock
-    # — where $? still reflects the payload's last statement — so a failing
-    # payload exits non-zero just like a bare `powershell -Command` would. The &
-    # operator otherwise masks the failure and rrun would exit 0 on a broken
-    # remote command, hiding errors from callers. [char]10 separates it from the
-    # payload's final line (a trailing comment would otherwise swallow it).
-    # Bytes -> text via a BOM-detecting StreamReader, NOT a hardcoded UTF-8
-    # decode: PowerShell 5.1 tooling routinely writes UTF-16LE .ps1 files
-    # (Out-File / > default), which a blind UTF-8 decode turns into garbage.
-    # BOM-less sources are decoded as UTF-8 (the documented contract).
-    wrapper="\$ProgressPreference='SilentlyContinue'; \$__rb=[Convert]::FromBase64String('$payload_b64'); & ([scriptblock]::Create((New-Object IO.StreamReader((New-Object IO.MemoryStream(,\$__rb)),\$true)).ReadToEnd() + [char]10 + 'if (-not \$?) { exit 1 }'))"
-    b64=$(printf %s "$wrapper" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
-    cmd="powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $b64"
-    ;;
-  bash|sh)
-    b64=$payload_b64
-    # File-backed decode -> run, NOT `echo b64 | base64 -d | shell`: without
-    # pipefail (unavailable in a POSIX login shell) that pipeline reports the
-    # SHELL's status, so a missing/broken remote base64 fed EOF to the shell and
-    # rrun exited 0 while the payload NEVER RAN. And NOT `s=$(...); shell -c "$s"`:
-    # command substitution strips trailing newlines, silently changing payloads
-    # that end in backslash-newline — execution must be byte-for-byte, like the
-    # transport. A temp file gives all three at once: exact bytes, an honest
-    # decoder status, and the payload keeping the REAL stdin (the ssh channel).
-    # The `sh -c '...'` outer wrap keeps the one-liner parseable even when the
-    # remote login shell is csh/fish. The payload's own exit code passes through
-    # untouched — rrun reserves nothing; its own decode failure exits 125 AND
-    # prints the stderr marker, which is what identifies it as transport-level.
-    # Traps clean the decoded payload file up on normal exit and on catchable
-    # HUP/INT/TERM (SIGKILL and host crashes can't be trapped); the EXIT trap
-    # does not alter the exit status, so the executor's code passes through.
-    cmd="sh -c 't=\$(mktemp) || exit 125; trap \"rm -f \\\"\$t\\\"\" 0; trap exit 1 2 15; echo $b64 | base64 -d > \"\$t\" || { echo rrun: remote decode failed >&2; exit 125; }; $shell \"\$t\"'"
-    ;;
+  ps|bash|sh) ;;
   *) echo "rrun: -s must be ps, bash or sh (got '$shell')" >&2; exit 2 ;;
 esac
 
@@ -194,53 +170,127 @@ for h in "${hops[@]}"; do
   fi
 done
 
-# Large payloads: the full command (payload embedded) can blow past the remote
-# command-line limit — 8191 chars via cmd.exe on stock Windows OpenSSH. For a
-# single hop (incl. -J), switch to streaming the base64 over stdin behind a
-# small fixed bootstrap. The ps bootstrap itself rides as -EncodedCommand: the
-# remote sshd's shell may be cmd OR PowerShell (DefaultShell), and a bare
-# "-Command iex(...)" form gets re-parsed by an outer PowerShell (it evaluates
-# the parenthesized subexpression itself, then re-quotes the payload through a
-# second -Command layer — silently corrupting $-bearing statements). Base64 is
-# inert in every shell; that's the whole point of this tool.
+# The composed command can blow past a command-line limit — 8191 chars via
+# cmd.exe on stock Windows OpenSSH, 128 KiB per argv element on Linux (E2BIG,
+# hit LOCALLY at exec time). Nested hops make that worse: every layer re-armors
+# the whole thing, so an embedded payload grows 4/3 per hop.
+#
+# So the payload can travel two ways, and rrun picks by measuring the finished
+# OUTERMOST command rather than guessing:
+#   embedded  — payload base64 rides inside the command string (small payloads)
+#   streamed  — payload base64 rides on stdin behind a small fixed bootstrap
+# Streaming works at ANY hop count: each intermediate ssh inherits its parent's
+# stdin and forwards it to the next hop, so only the innermost bootstrap
+# consumes it, and the nested command stays tiny no matter how big the payload.
+#
+# The ps bootstrap rides as -EncodedCommand: the remote sshd's shell may be cmd
+# OR PowerShell (DefaultShell), and a bare "-Command iex(...)" form gets
+# re-parsed by an outer PowerShell (it evaluates the parenthesized subexpression
+# itself, then re-quotes the payload through a second -Command layer — silently
+# corrupting $-bearing statements). Base64 is inert in every shell; that's the
+# whole point of this tool.
+# RRUN_STREAM_LIMIT is the embed->stream THRESHOLD (not a ceiling): crossing it
+# just switches transports. RRUN_MAX_CMD is the hard ceiling — the point where
+# even the streamed form cannot be delivered, so rrun must fail with advice
+# instead of leaking E2BIG. Default 100000 keeps clear of the 128 KiB
+# (MAX_ARG_STRLEN) per-argv-element limit measured on Linux.
 limit=${RRUN_STREAM_LIMIT:-6000}
-stream=0
-if (( ${#hops[@]} == 1 && ${#cmd} > limit )); then
-  stream=1
-  case "$shell" in
-    ps)
-      # same wrapper as above (incl. the exit-propagation epilogue and the
-      # BOM-detecting decode), reading the payload base64 from stdin instead
-      boot="\$ProgressPreference='SilentlyContinue'; \$__rb=[Convert]::FromBase64String([Console]::In.ReadToEnd()); & ([scriptblock]::Create((New-Object IO.StreamReader((New-Object IO.MemoryStream(,\$__rb)),\$true)).ReadToEnd() + [char]10 + 'if (-not \$?) { exit 1 }'))"
-      bootb64=$(printf %s "$boot" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
-      cmd="powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $bootb64"
-      b64=$payload_b64
-      ;;
-    *)
-      # streamed: payload arrives on stdin, so it can't ride argv — decode to a
-      # temp file, check the decoder's status, run, clean up (trap on exit and
-      # catchable signals), and pass the payload's own exit code through. Same
-      # decode-failure contract (exit 125 + stderr marker).
-      cmd="sh -c 't=\$(mktemp) || exit 125; trap \"rm -f \\\"\$t\\\"\" 0; trap exit 1 2 15; base64 -d > \"\$t\" || { echo rrun: remote decode failed >&2; exit 125; }; $shell \"\$t\"'"
-      ;;
-  esac
-fi
-
-# Wrap outward from the final hop: each intermediate host runs
-#   ssh <next> 'echo <b64> | base64 -d | bash'
-# where the quoted part is pure base64 — no hop ever parses a metacharacter
-# originating from an inner layer, so quoting never stacks.
-for ((i=${#hops[@]}-2; i>=0; i--)); do
-  b=$(printf %s "$cmd" | base64 -w0)
-  # hop decode keeps the status-honest $(...) form (no single quotes inside —
-  # the layer itself is single-quoted). Trailing-newline stripping is harmless
-  # HERE because the decoded text is rrun's own generated one-line ssh command,
-  # never user payload bytes. Hop login shells must be POSIX-capable.
-  cmd="ssh -o BatchMode=yes ${hops[i+1]} 's=\$(echo $b | base64 -d) || { echo rrun: hop decode failed >&2; exit 125; }; exec bash -c \"\$s\"'"
+maxcmd=${RRUN_MAX_CMD:-100000}
+# Arithmetic contexts recursively evaluate variable contents, so a non-numeric
+# value becomes a confusing arithmetic/unbound error instead of a diagnostic.
+for v in limit maxcmd; do
+  if [[ ! ${!v} =~ ^[0-9]+$ ]]; then
+    n=RRUN_STREAM_LIMIT; [[ $v == maxcmd ]] && n=RRUN_MAX_CMD
+    echo "rrun: $n must be a non-negative integer (got '${!v}')" >&2
+    exit 2
+  fi
 done
 
-if (( ${#hops[@]} > 1 )) && [[ $shell == ps ]] && (( ${#cmd} > limit )); then
-  echo "rrun: payload too large for a nested-hop chain to a PowerShell target (Windows command-line limit); use -J <hops> instead — ProxyJump is a single connection and can stream" >&2
+if [[ $shell == ps ]]; then
+  # The payload text is never touched: prepending a statement broke param()/
+  # using payloads (they must be a script's FIRST statements). Instead a fixed
+  # wrapper sets ProgressPreference (else EncodedCommand with redirected stderr
+  # spews "#< CLIXML ... Preparing modules" progress records) and runs the
+  # decoded source as its own scriptblock, preserving its lexical start.
+  # The epilogue ("if (-not $?) { exit 1 }") is appended INSIDE the scriptblock
+  # — where $? still reflects the payload's last statement — so a failing
+  # payload exits non-zero just like a bare `powershell -Command` would. The &
+  # operator otherwise masks the failure and rrun would exit 0 on a broken
+  # remote command, hiding errors from callers. [char]10 separates it from the
+  # payload's final line (a trailing comment would otherwise swallow it).
+  # Bytes -> text via a BOM-detecting StreamReader, NOT a hardcoded UTF-8
+  # decode: PowerShell 5.1 tooling routinely writes UTF-16LE .ps1 files
+  # (Out-File / > default), which a blind UTF-8 decode turns into garbage.
+  # BOM-less sources are decoded as UTF-8 (the documented contract).
+  ps_wrapper="\$ProgressPreference='SilentlyContinue'; \$__rb=[Convert]::FromBase64String('$payload_b64'); & ([scriptblock]::Create((New-Object IO.StreamReader((New-Object IO.MemoryStream(,\$__rb)),\$true)).ReadToEnd() + [char]10 + 'if (-not \$?) { exit 1 }'))"
+  ps_embed_b64=$(printf %s "$ps_wrapper" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
+  # same wrapper, reading the payload base64 from stdin instead
+  ps_boot="\$ProgressPreference='SilentlyContinue'; \$__rb=[Convert]::FromBase64String([Console]::In.ReadToEnd()); & ([scriptblock]::Create((New-Object IO.StreamReader((New-Object IO.MemoryStream(,\$__rb)),\$true)).ReadToEnd() + [char]10 + 'if (-not \$?) { exit 1 }'))"
+  ps_stream_b64=$(printf %s "$ps_boot" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
+fi
+
+compose() {  # $1: 0 = payload embedded in the command, 1 = payload on stdin
+  local st=$1 c b i
+  case "$shell" in
+    ps)
+      if (( st )); then c="powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $ps_stream_b64"
+      else              c="powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $ps_embed_b64"
+      fi
+      ;;
+    *)
+      # File-backed decode -> run, NOT `echo b64 | base64 -d | shell`: without
+      # pipefail (unavailable in a POSIX login shell) that pipeline reports the
+      # SHELL's status, so a missing/broken remote base64 fed EOF to the shell
+      # and rrun exited 0 while the payload NEVER RAN. And NOT
+      # `s=$(...); shell -c "$s"`: command substitution strips trailing
+      # newlines, silently changing payloads that end in backslash-newline —
+      # execution must be byte-for-byte, like the transport. A temp file gives
+      # all three at once: exact bytes, an honest decoder status, and (when
+      # embedded) the payload keeping the REAL stdin. The `sh -c '...'` outer
+      # wrap keeps the one-liner parseable even when the remote login shell is
+      # csh/fish. The payload's own exit code passes through untouched — rrun
+      # reserves nothing; its own decode failure exits 125 AND prints the
+      # stderr marker, which is what identifies it as transport-level. Traps
+      # clean the decoded file up on normal exit and on catchable HUP/INT/TERM
+      # (SIGKILL and host crashes can't be trapped); the EXIT trap does not
+      # alter the exit status, so the executor's code passes through.
+      if (( st )); then
+        c="sh -c 't=\$(mktemp) || exit 125; trap \"rm -f \\\"\$t\\\"\" 0; trap exit 1 2 15; base64 -d > \"\$t\" || { echo rrun: remote decode failed >&2; exit 125; }; $shell \"\$t\"'"
+      else
+        c="sh -c 't=\$(mktemp) || exit 125; trap \"rm -f \\\"\$t\\\"\" 0; trap exit 1 2 15; echo $payload_b64 | base64 -d > \"\$t\" || { echo rrun: remote decode failed >&2; exit 125; }; $shell \"\$t\"'"
+      fi
+      ;;
+  esac
+  # Wrap outward from the final hop: each intermediate host runs
+  #   ssh <next> '<armored inner command>'
+  # where the quoted part is pure base64 — no hop ever parses a metacharacter
+  # originating from an inner layer, so quoting never stacks. The hop layer
+  # keeps the status-honest $(...) form (no single quotes inside — the layer
+  # itself is single-quoted); trailing-newline stripping is harmless HERE
+  # because the decoded text is rrun's own generated one-line ssh command,
+  # never user payload bytes. `exec` keeps stdin attached to the next ssh, so
+  # a streamed payload flows through the whole chain. Hop login shells must be
+  # POSIX-capable.
+  for ((i=${#hops[@]}-2; i>=0; i--)); do
+    b=$(printf %s "$c" | base64 -w0)
+    c="ssh -o BatchMode=yes ${hops[i+1]} 's=\$(echo $b | base64 -d) || { echo rrun: hop decode failed >&2; exit 125; }; exec bash -c \"\$s\"'"
+  done
+  printf %s "$c"
+}
+
+cmd=$(compose 0)
+stream=0
+if (( ${#cmd} > limit )); then
+  stream=1
+  cmd=$(compose 1)
+  b64=$payload_b64
+fi
+
+# Backstop: even the streamed form is per-hop re-armored, so a very deep chain
+# can still outgrow what execve will accept. Fail with advice rather than
+# leaking "Argument list too long" from the exec itself.
+if (( ${#cmd} > maxcmd )); then
+  echo "rrun: composed command is ${#cmd} chars, over the ${maxcmd} limit (${#hops[@]} hops); use -J <hops> instead — ProxyJump is a single connection" >&2
   exit 2
 fi
 

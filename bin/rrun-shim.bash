@@ -30,7 +30,8 @@
 #          file-backed decode — execution byte-for-byte ($(...) stripped
 #          trailing newlines, changing backslash-newline-final payloads);
 #          v1.8 cleanup traps — decoded payload file never outlives an
-#          interrupted wrapper.
+#          interrupted wrapper; v1.9 explicitly empty -c is a valid no-op
+#          program (only a MISSING argument is an error) — matches core+ps shim.
 set -euo pipefail
 
 xlate() {  # absolute Windows path -> /mnt/<d>/... for WSL
@@ -63,7 +64,9 @@ if [[ $host == local ]]; then
   src=$1
   # straight to base64 — a $(cat) capture would strip trailing newlines
   case "$src" in
-    -c) pb64=$(printf %s "${2:?rrun: -c needs a command string}" | base64 -w0) ;;
+    # ${2?...} not ${2:?...}: an explicitly empty command is a valid no-op
+    # program; only a MISSING argument is an error (matches core + ps shim).
+    -c) pb64=$(printf %s "${2?rrun: -c needs a command string}" | base64 -w0) ;;
     -)  pb64=$(base64 -w0) ;;
     *)  pb64=$(base64 -w0 < "$src") ;;
   esac

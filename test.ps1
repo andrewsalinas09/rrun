@@ -6,7 +6,10 @@
 # Exit code = number of failures. This is the gate for the RSI loop.
 param(
   [string]$TargetHost = '',
-  [string]$TargetShell = 'bash'
+  [string]$TargetShell = 'bash',
+  # e.g. -TargetHops 'pi,localhost' — a real nested chain (needs each hop able
+  # to ssh to the next, with POSIX shell + base64 on the intermediates)
+  [string]$TargetHops = ''
 )
 $ErrorActionPreference = 'Continue'
 $repo = $PSScriptRoot
@@ -192,6 +195,30 @@ if ($TargetHost) {
     Check 'REGRESSION: failing streamed ps payload exits non-zero (real host)' ($r.Exit -ne 0 -and $r.Exit -ne 124) "exit=$($r.Exit)"
     Check 'REGRESSION: streamed ps failure text visible (real host)' ($r.Out -match 'not recognized') $r.Out.Trim()
   }
+}
+if ($TargetHops) {
+  Write-Host "[nested hops: $TargetHops]"
+  # Payload reports the byte count + md5 of the file it executed from, so a
+  # short or corrupted stream is caught — not merely a missing marker — and
+  # exits 7 so status propagation through every layer is checked too.
+  $lines = @('echo START') +
+    (1..900 | ForEach-Object { "# padding line $_ to push the payload past the streaming threshold" }) +
+    @('echo "BYTES:$(wc -c < "$0") MD5:$(md5sum < "$0" | cut -d" " -f1)"', 'echo END', 'exit 7')
+  $hopFile = Join-Path $tmpDir 'hop-payload.sh'
+  [IO.File]::WriteAllText($hopFile, ($lines -join "`n") + "`n")
+  $bytes = [IO.File]::ReadAllBytes($hopFile)
+  $md5 = ([BitConverter]::ToString([Security.Cryptography.MD5]::Create().ComputeHash($bytes)) -replace '-', '').ToLower()
+
+  $out = (& $shim -s bash $TargetHops -c 'echo nested-small-ok' 2>&1 | Out-String)
+  Check 'small payload over nested hops' ($out -match 'nested-small-ok') $out.Trim()
+
+  # the case that used to die locally with E2BIG: an embedded payload grows
+  # 4/3 per hop, so a big script blew past the 128KiB argv ceiling
+  $out = wsl.exe -e bash -c 'timeout 180 "$HOME/.local/bin/rrun" -s bash "$1" "$2" 2>&1' rrun-hops $TargetHops (ToWslPath $hopFile) 2>&1 | Out-String
+  $hopExit = $LASTEXITCODE
+  Check 'REGRESSION: large payload streams THROUGH nested hops (was E2BIG)' ($out -match 'END') $out.Trim()
+  Check 'nested streamed payload arrives byte-for-byte (md5 verified)' (($out -match "BYTES:$($bytes.Length)\b") -and ($out -match "MD5:$md5")) $out.Trim()
+  Check 'nested streamed payload exit code propagates (7)' ($hopExit -eq 7) "exit=$hopExit"
 }
 Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
 
