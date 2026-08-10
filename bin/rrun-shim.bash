@@ -17,7 +17,9 @@
 # history: v1 2026-08-10 created from transcript-error audit; v1.1 $HOME trampoline,
 #          CLIXML suppression; v1.2 review fixes — -n honored in local mode (was
 #          EXECUTING on dry-run), -c args no longer path-translated, -s validated,
-#          -J rejected for host local.
+#          -J rejected for host local; v1.3 local payloads never textually
+#          modified (prefix broke param()/using — scriptblock wrapper instead)
+#          and encoded straight from file/stdin (trailing newlines preserved).
 set -euo pipefail
 
 xlate() {  # absolute Windows path -> /mnt/<d>/... for WSL
@@ -48,24 +50,28 @@ host=$1; shift
 if [[ $host == local ]]; then
   if (( jump )); then echo 'rrun: -J is meaningless with host "local"' >&2; exit 2; fi
   src=$1
+  # straight to base64 — a $(cat) capture would strip trailing newlines
   case "$src" in
-    -c) payload=${2:?rrun: -c needs a command string} ;;
-    -)  payload=$(cat) ;;
-    *)  payload=$(cat -- "$src") ;;
+    -c) pb64=$(printf %s "${2:?rrun: -c needs a command string}" | base64 -w0) ;;
+    -)  pb64=$(base64 -w0) ;;
+    *)  pb64=$(base64 -w0 < "$src") ;;
   esac
   if [[ -z $shell ]]; then
     case "$src" in *.sh|*.bash) shell=bash ;; *) shell=ps ;; esac
   fi
   if [[ $shell == ps ]]; then
-    # ProgressPreference: suppress "#< CLIXML ... Preparing modules" stderr noise
-    b64=$(printf %s "\$ProgressPreference='SilentlyContinue'; $payload" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
+    # payload text never modified (a prefix broke param()/using payloads): fixed
+    # wrapper sets ProgressPreference (CLIXML progress noise) and runs the
+    # decoded source as its own scriptblock
+    wrapper="\$ProgressPreference='SilentlyContinue'; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$pb64'))))"
+    b64=$(printf %s "$wrapper" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
     if (( dry )); then
       printf 'powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand %s\n' "$b64"
       exit 0
     fi
     exec powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand "$b64"
   else
-    b64=$(printf %s "$payload" | base64 -w0)
+    b64=$pb64
     if (( dry )); then
       printf 'wsl -e bash -c %q\n' "echo $b64 | base64 -d | $shell"
       exit 0

@@ -10,3 +10,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Core regression tests (mocked ssh)
         run: bash tests/core-tests.sh
+  windows-shim:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: PowerShell shim local-mode tests (real powershell.exe)
+        shell: pwsh
+        run: ./tests/shim-local-tests.ps1

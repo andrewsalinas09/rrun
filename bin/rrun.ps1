@@ -14,7 +14,9 @@
 #          CLIXML suppression; v1.2 review fixes — -n honored in local mode (was
 #          EXECUTING on dry-run), -c args no longer path-translated, -s validated,
 #          -J rejected for host local; v1.3 "local -c" with no command now exits 2
-#          (out-of-range $rest[1] was silently $null -> empty successful run).
+#          (out-of-range $rest[1] was silently $null -> empty successful run);
+#          v1.4 local ps payloads never textually modified (prefix broke
+#          param()/using — scriptblock wrapper instead).
 $ErrorActionPreference = 'Stop'
 
 function Fail([string]$msg) {
@@ -66,9 +68,13 @@ if ($hostSpec -eq 'local') {
   }
   if (-not $shell) { $shell = if ($src -match '\.(sh|bash)$') { 'bash' } else { 'ps' } }
   if ($shell -eq 'ps') {
-    # suppress "#< CLIXML ... Preparing modules" stderr noise under -EncodedCommand
-    $payload = '$ProgressPreference=''SilentlyContinue''; ' + $payload
-    $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($payload))
+    # payload text never modified (a prepended statement broke param()/using,
+    # which must be a script's first statements): a fixed wrapper sets
+    # ProgressPreference (suppresses "#< CLIXML ... Preparing modules" stderr
+    # noise) and runs the decoded source as its own scriptblock
+    $pb64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
+    $wrapper = '$ProgressPreference=''SilentlyContinue''; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(''{0}''))))' -f $pb64
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($wrapper))
     if ($dry) { Write-Output "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $b64"; exit 0 }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $b64
     exit $LASTEXITCODE

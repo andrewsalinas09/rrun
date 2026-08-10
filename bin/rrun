@@ -30,6 +30,13 @@
 #                 payloads (Windows 8191-char command-line ceiling), %q paste-safe
 #                 dry-run, host-token validation, -s validation, missing-optarg
 #                 errors, cat --, size guard on multi-hop ps targets.
+#   v2.3 2026-08-10 payload text is NEVER modified: the ProgressPreference
+#                 prefix broke payloads starting with param()/using (must be a
+#                 script's first statements). Payloads now ride as untouched
+#                 UTF-8 base64 inside a fixed wrapper that sets the preference
+#                 and runs the decoded source as its own scriptblock. Sources
+#                 are also encoded straight from the file/stdin (a $(cat)
+#                 capture stripped trailing newlines — byte-for-byte now).
 #   v2.2.1 2026-08-10 streaming ps bootstrap now travels as -EncodedCommand:
 #                 the bare "-Command iex(...)" form was re-parsed when the remote
 #                 sshd DefaultShell was PowerShell (outer shell evaluated the
@@ -60,10 +67,13 @@ fi
 
 hostspec=$1; shift
 src=$1
+# Encode the source STRAIGHT into base64 — capturing file/stdin contents in a
+# shell variable first would strip trailing newlines (command substitution
+# deletes them), breaking byte-for-byte payload preservation.
 case "$src" in
-  -c) payload=${2:?rrun: -c needs a command string} ;;
-  -)  payload=$(cat) ;;
-  *)  payload=$(cat -- "$src") ;;
+  -c) payload_b64=$(printf %s "${2:?rrun: -c needs a command string}" | base64 -w0) ;;
+  -)  payload_b64=$(base64 -w0) ;;
+  *)  payload_b64=$(base64 -w0 < "$src") ;;
 esac
 
 if [[ -z $shell ]]; then
@@ -75,13 +85,17 @@ fi
 
 case "$shell" in
   ps)
-    # ProgressPreference: EncodedCommand with redirected stderr otherwise spews
-    # "#< CLIXML ... Preparing modules" progress records into captured output.
-    b64=$(printf %s "\$ProgressPreference='SilentlyContinue'; $payload" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
+    # The payload text is never touched: prepending a statement broke param()/
+    # using payloads (they must be a script's FIRST statements). Instead a fixed
+    # wrapper sets ProgressPreference (else EncodedCommand with redirected
+    # stderr spews "#< CLIXML ... Preparing modules" progress records) and runs
+    # the decoded source as its own scriptblock, preserving its lexical start.
+    wrapper="\$ProgressPreference='SilentlyContinue'; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$payload_b64'))))"
+    b64=$(printf %s "$wrapper" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
     cmd="powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $b64"
     ;;
   bash|sh)
-    b64=$(printf %s "$payload" | base64 -w0)
+    b64=$payload_b64
     cmd="echo $b64 | base64 -d | $shell"
     ;;
   *) echo "rrun: -s must be ps, bash or sh (got '$shell')" >&2; exit 2 ;;
@@ -114,9 +128,11 @@ if (( ${#hops[@]} == 1 && ${#cmd} > limit )); then
   stream=1
   case "$shell" in
     ps)
-      boot='iex([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd())))'
+      # same wrapper as above, reading the payload base64 from stdin instead
+      boot="\$ProgressPreference='SilentlyContinue'; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd()))))"
       bootb64=$(printf %s "$boot" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
       cmd="powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $bootb64"
+      b64=$payload_b64
       ;;
     *)  cmd="base64 -d | $shell" ;;
   esac

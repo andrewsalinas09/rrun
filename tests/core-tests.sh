@@ -46,9 +46,28 @@ check 'bash payload survives armoring byte-for-byte' $?
 PATH="$stubpath" "$RRUN" examplehost -c 'Get-Date # metachars $x "y"' < /dev/null
 argv
 b64=${ARGV[-1]##* }
-decoded=$(printf %s "$b64" | base64 -d | iconv -f UTF-16LE -t UTF-8)
-[[ $decoded == *'Get-Date # metachars $x "y"'* && $decoded == *SilentlyContinue* ]]
-check 'ps payload survives UTF-16LE armoring + progress prefix' $?
+wrapper=$(printf %s "$b64" | base64 -d | iconv -f UTF-16LE -t UTF-8)
+pb64=$(sed -n "s/.*FromBase64String('\([A-Za-z0-9+/=]*\)').*/\1/p" <<<"$wrapper")
+[[ $(printf %s "$pb64" | base64 -d) == 'Get-Date # metachars $x "y"' && $wrapper == "\$ProgressPreference='SilentlyContinue'; & ([scriptblock]::Create("* ]]
+check 'ps payload survives untouched inside scriptblock wrapper' $?
+
+# REGRESSION: payload text must NEVER be modified — a prepended statement broke
+# param()/using payloads (must be a script's first statements) — and must keep
+# trailing newlines ($(cat) capture used to strip them). cmp = byte-for-byte.
+printf 'using namespace System.Text\nparam($x)\nWrite-Output ok\n\n' > "$work/payload.ps1"
+PATH="$stubpath" "$RRUN" examplehost "$work/payload.ps1" < /dev/null
+argv
+wrapper=$(printf %s "${ARGV[-1]##* }" | base64 -d | iconv -f UTF-16LE -t UTF-8)
+sed -n "s/.*FromBase64String('\([A-Za-z0-9+/=]*\)').*/\1/p" <<<"$wrapper" | tr -d '\n' | base64 -d > "$work/decoded"
+cmp -s "$work/payload.ps1" "$work/decoded"
+check 'ps file payload byte-for-byte: using/param first lines, trailing newlines' $?
+
+printf 'echo ok\n\n\n' > "$work/payload.sh"
+PATH="$stubpath" "$RRUN" -s bash examplehost "$work/payload.sh" < /dev/null
+argv
+sed -n 's/^echo \([A-Za-z0-9+/=]*\) | base64 -d | bash$/\1/p' <<<"${ARGV[-1]}" | tr -d '\n' | base64 -d > "$work/decoded"
+cmp -s "$work/payload.sh" "$work/decoded"
+check 'bash file payload byte-for-byte: trailing newlines preserved' $?
 
 PATH="$stubpath" "$RRUN" -s bash h1,h2 -c 'echo deep' < /dev/null
 argv
@@ -66,11 +85,11 @@ check 'large bash payload streams over stdin' $?
 
 RRUN_STREAM_LIMIT=10 PATH="$stubpath" "$RRUN" examplehost -c 'Get-BigThing' < /dev/null
 argv
-decoded=$(base64 -d < "$STUB_OUT.stdin" | iconv -f UTF-16LE -t UTF-8)
+decoded=$(base64 -d < "$STUB_OUT.stdin")
 bootb64=$(sed -n 's/^powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand \([A-Za-z0-9+/=]*\)$/\1/p' <<<"${ARGV[-1]}")
 boot=$(printf %s "$bootb64" | base64 -d | iconv -f UTF-16LE -t UTF-8)
-[[ -n $bootb64 && $boot == *'FromBase64String([Console]::In.ReadToEnd())'* && $decoded == *Get-BigThing* ]]
-check 'large ps payload streams behind fixed bootstrap' $?
+[[ -n $bootb64 && $boot == *'FromBase64String([Console]::In.ReadToEnd())'* && $boot == *scriptblock* && $decoded == 'Get-BigThing' ]]
+check 'large ps payload streams behind fixed scriptblock bootstrap' $?
 
 # REGRESSION: the ps streaming bootstrap must be INERT in the remote sshd shell
 # (cmd, PowerShell via DefaultShell, or a POSIX sh). A bare "-Command iex(...)"

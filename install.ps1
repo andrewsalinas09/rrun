@@ -14,8 +14,10 @@ function ToWslPath([string]$p) {
 
 Write-Host '[1/6] WSL core -> ~/.local/bin/rrun'
 $srcWsl = ToWslPath (Join-Path $repo 'bin\rrun')
-$sh = 'mkdir -p "$HOME/.local/bin" && tr -d ''\r'' < "{0}" > "$HOME/.local/bin/rrun" && chmod +x "$HOME/.local/bin/rrun" && bash -n "$HOME/.local/bin/rrun"' -f $srcWsl
-wsl.exe -e sh -c $sh
+# the repo path rides as $1 (positional data), never interpolated into shell
+# source — a path containing $ ( ) etc. must not be parsed by the WSL shell
+$sh = 'mkdir -p "$HOME/.local/bin" && tr -d ''\r'' < "$1" > "$HOME/.local/bin/rrun" && chmod +x "$HOME/.local/bin/rrun" && bash -n "$HOME/.local/bin/rrun"'
+wsl.exe -e sh -c $sh sh $srcWsl
 if ($LASTEXITCODE -ne 0) { throw 'WSL core install failed (is a WSL distro installed and running?)' }
 
 Write-Host '[2/6] Windows shims -> %USERPROFILE%\.local\bin'
