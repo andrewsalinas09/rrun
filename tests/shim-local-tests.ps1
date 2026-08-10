@@ -30,6 +30,18 @@ $out = & $shim local $u16 2>&1 | Out-String
 Check 'REGRESSION: UTF-16LE payload file decodes (BOM-aware)' ($out -match 'u16len:4') $out.Trim()
 Remove-Item $u16 -ErrorAction SilentlyContinue
 
+# REGRESSION: bash/sh FILE operands must ride as raw bytes. ReadAllText
+# BOM-decoded them and re-encoded as UTF-8, so a UTF-16LE (or any non-UTF-8)
+# shell file reached WSL transformed — text preservation, not bytes. No WSL
+# needed: pull the base64 out of the dry-run and compare to the file bytes.
+$rawFile = Join-Path $env:TEMP "rrun-ci-raw-$PID.sh"
+$rawBytes = [byte[]](0xFF, 0xFE, 0x68, 0x69, 0x0A, 0x00, 0xE9, 0x0D, 0x0A, 0x0A, 0x0A)
+[IO.File]::WriteAllBytes($rawFile, $rawBytes)
+$dry = & $shim -n -s bash local $rawFile 2>&1 | Out-String
+$m = [regex]::Match($dry, 'echo ([A-Za-z0-9+/=]+) \| base64')
+Check 'REGRESSION: bash file operand rides as raw bytes (b64 == file bytes)' ($m.Success -and ($m.Groups[1].Value -eq [Convert]::ToBase64String($rawBytes))) $dry.Trim()
+Remove-Item $rawFile -ErrorAction SilentlyContinue
+
 $out = & $shim -n local -c 'Write-Output SHOULD-NOT-RUN' 2>&1 | Out-String
 Check 'REGRESSION: -n local dry-runs, never executes' ($out -notmatch 'SHOULD-NOT-RUN\s*$' -and $out -match 'EncodedCommand')
 

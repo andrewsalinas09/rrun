@@ -76,6 +76,23 @@ out=$(sh -c "${ARGV[-1]}" 2>/dev/null </dev/null); rc=$?
 [[ $rc == 0 && $out == '<>' ]]
 check 'trailing backslash-newline payload executes byte-for-byte (<> not <\>)' $?
 
+# REGRESSION: the decoded payload file must not outlive an interrupted wrapper
+# (payloads can contain secrets). The payload records its own path ($0 — with
+# file-backed execution that IS the temp file), then sleeps; TERM the whole
+# process group (a POSIX shell defers signal traps until its foreground child
+# exits, so the child must die too) and the trap must remove the file.
+printf 'echo "$0" > %s\nsleep 5\n' "$work/t0" > "$work/slow.sh"
+PATH="$stubpath" "$RRUN" -s bash examplehost "$work/slow.sh" < /dev/null
+argv
+setsid sh -c "${ARGV[-1]}" </dev/null >/dev/null 2>&1 &
+wpid=$!
+for _ in $(seq 1 50); do [[ -s $work/t0 ]] && break; sleep 0.1; done
+tf=$(cat "$work/t0" 2>/dev/null)
+kill -TERM -- -"$wpid" 2>/dev/null
+for _ in $(seq 1 20); do [[ -n $tf && ! -e $tf ]] && break; sleep 0.1; done
+[[ -n $tf && ! -e $tf ]]
+check 'interrupted wrapper cleans up decoded payload file (trap)' $?
+
 PATH="$stubpath" "$RRUN" examplehost -c 'Get-Date # metachars $x "y"' < /dev/null
 argv
 b64=${ARGV[-1]##* }

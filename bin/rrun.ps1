@@ -25,7 +25,9 @@
 #          v1.7 status-honest local bash/sh decode (broken base64 -> loud
 #          125, not silent success); v1.8 file-backed decode — execution
 #          byte-for-byte ($(...) stripped trailing newlines, changing
-#          backslash-newline-final payloads).
+#          backslash-newline-final payloads); v1.9 file operands read as RAW
+#          BYTES (ReadAllText BOM-decoded + UTF-8 re-encoded bash/sh files —
+#          text preservation, not bytes) + cleanup traps on the temp file.
 $ErrorActionPreference = 'Stop'
 
 function Fail([string]$msg) {
@@ -67,13 +69,21 @@ $hostSpec = $rest[0]; $rest = @($rest[1..($rest.Count - 1)])
 if ($hostSpec -eq 'local') {
   if ($jump) { Fail 'rrun: -J is meaningless with host "local"' }
   $src = $rest[0]
+  $payloadBytes = $null
   switch ($src) {
     '-c' {
       if ($rest.Count -lt 2) { Fail 'rrun: -c needs a command string' }
       $payload = $rest[1]
     }
     '-'  { $payload = [Console]::In.ReadToEnd() }
-    default { $payload = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $src).Path) }
+    default {
+      # file operands ride as RAW BYTES. ReadAllText would BOM-decode and later
+      # re-encode as UTF-8 — text preservation, not byte preservation: a
+      # UTF-16LE shell file reached WSL deterministically transformed. Only the
+      # ps path needs source TEXT (decoded BOM-aware below); bash/sh get the
+      # original bytes, exactly like the core and the Git Bash shim.
+      $payloadBytes = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $src).Path)
+    }
   }
   if (-not $shell) { $shell = if ($src -match '\.(sh|bash)$') { 'bash' } else { 'ps' } }
   if ($shell -eq 'ps') {
@@ -84,6 +94,11 @@ if ($hostSpec -eq 'local') {
     # exits non-zero when the payload's last statement failed ($? read INSIDE
     # the scriptblock, before the & operator masks it) so failures aren't
     # silently swallowed. [char]10 keeps it off the payload's final line.
+    if ($null -ne $payloadBytes) {
+      # BOM-aware decode, same contract as the remote wrapper: UTF-8/16/32
+      # BOMs honored, BOM-less = UTF-8
+      $payload = (New-Object IO.StreamReader((New-Object IO.MemoryStream(,$payloadBytes)), $true)).ReadToEnd()
+    }
     $pb64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
     $wrapper = '$ProgressPreference=''SilentlyContinue''; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(''' + $pb64 + ''')) + [char]10 + ''if (-not $?) { exit 1 }''))'
     $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($wrapper))
@@ -91,11 +106,13 @@ if ($hostSpec -eq 'local') {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $b64
     exit $LASTEXITCODE
   } else {
-    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
-    # file-backed status-honest decode (see core v2.3.4): a plain pipeline hid
-    # decoder failures (silent success), and s=$(...) stripped trailing
-    # newlines at execution time. Temp file = exact bytes + honest status.
-    $run = 't=$(mktemp) || exit 125; echo ' + $b64 + ' | base64 -d > "$t" || { rm -f "$t"; echo rrun: local decode failed >&2; exit 125; }; ' + $shell + ' "$t"; r=$?; rm -f "$t"; exit $r'
+    $b64 = if ($null -ne $payloadBytes) { [Convert]::ToBase64String($payloadBytes) }
+           else { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload)) }
+    # file-backed status-honest decode (see core v2.3.5): a plain pipeline hid
+    # decoder failures (silent success), s=$(...) stripped trailing newlines at
+    # execution time, and the traps guarantee the decoded payload never
+    # outlives an interrupted wrapper. Exit status = the executor's own.
+    $run = 't=$(mktemp) || exit 125; trap "rm -f \"$t\"" 0; trap exit 1 2 15; echo ' + $b64 + ' | base64 -d > "$t" || { echo rrun: local decode failed >&2; exit 125; }; ' + $shell + ' "$t"'
     if ($dry) { Write-Output "wsl -e bash -c `"$run`""; exit 0 }
     & wsl.exe -e bash -c $run
     exit $LASTEXITCODE
