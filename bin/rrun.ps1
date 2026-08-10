@@ -16,7 +16,9 @@
 #          -J rejected for host local; v1.3 "local -c" with no command now exits 2
 #          (out-of-range $rest[1] was silently $null -> empty successful run);
 #          v1.4 local ps payloads never textually modified (prefix broke
-#          param()/using — scriptblock wrapper instead).
+#          param()/using — scriptblock wrapper instead); v1.5 wrapper appends
+#          `if (-not $?) { exit 1 }` so failing local ps payloads exit non-zero
+#          (the & operator otherwise swallowed the failure -> false success).
 $ErrorActionPreference = 'Stop'
 
 function Fail([string]$msg) {
@@ -71,9 +73,12 @@ if ($hostSpec -eq 'local') {
     # payload text never modified (a prepended statement broke param()/using,
     # which must be a script's first statements): a fixed wrapper sets
     # ProgressPreference (suppresses "#< CLIXML ... Preparing modules" stderr
-    # noise) and runs the decoded source as its own scriptblock
+    # noise) and runs the decoded source as its own scriptblock. The epilogue
+    # exits non-zero when the payload's last statement failed ($? read INSIDE
+    # the scriptblock, before the & operator masks it) so failures aren't
+    # silently swallowed. [char]10 keeps it off the payload's final line.
     $pb64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
-    $wrapper = '$ProgressPreference=''SilentlyContinue''; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(''{0}''))))' -f $pb64
+    $wrapper = '$ProgressPreference=''SilentlyContinue''; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(''' + $pb64 + ''')) + [char]10 + ''if (-not $?) { exit 1 }''))'
     $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($wrapper))
     if ($dry) { Write-Output "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $b64"; exit 0 }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $b64

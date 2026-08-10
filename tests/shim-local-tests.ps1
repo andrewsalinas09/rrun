@@ -24,6 +24,21 @@ Check 'REGRESSION: using-namespace payload runs' ($out -match 'ci-using-ok') $ou
 $out = & $shim -n local -c 'Write-Output SHOULD-NOT-RUN' 2>&1 | Out-String
 Check 'REGRESSION: -n local dry-runs, never executes' ($out -notmatch 'SHOULD-NOT-RUN\s*$' -and $out -match 'EncodedCommand')
 
+# Failures must be LOUD (stderr text) AND non-zero exit — a transport that
+# swallows either is worse than useless for debugging. Exit codes must match a
+# bare `powershell -Command`: any failure -> non-zero, explicit `exit N` -> N.
+$err = & $shim local -c 'no-such-command-xyz' 2>&1 | Out-String
+Check 'REGRESSION: failing payload exits non-zero (not a false success)' ($LASTEXITCODE -ne 0) "exit=$LASTEXITCODE"
+Check 'REGRESSION: failure text is visible on stderr' ($err -match 'no-such-command-xyz' -and $err -match 'not recognized') $err.Trim()
+& $shim local -c 'Write-Error boom' 2>$null
+Check 'REGRESSION: Write-Error payload exits non-zero' ($LASTEXITCODE -ne 0) "exit=$LASTEXITCODE"
+& $shim local -c 'Write-Output fine' 2>$null
+Check 'success payload exits zero' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
+& $shim local -c 'exit 3' 2>$null
+Check 'explicit exit code preserved (exit 3 -> 3)' ($LASTEXITCODE -eq 3) "exit=$LASTEXITCODE"
+& $shim local -c "Write-Error mid`nWrite-Output recovered" 2>$null
+Check 'recovered payload (error then success) exits zero, like bare -Command' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
+
 & $shim local -c 2>$null
 Check 'REGRESSION: local -c with no command exits 2' ($LASTEXITCODE -eq 2)
 

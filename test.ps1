@@ -22,6 +22,33 @@ function ToWslPath([string]$p) {
   return $r
 }
 
+# Streamed (large-payload) sessions to a Windows sshd can wedge remotely BEFORE
+# the payload runs — a nondeterministic host-side race, independent of payload
+# content and rrun version (see README known issues). A wedged check must be a
+# LOUD failure, never a silently hung suite: WSL `timeout` maps a wedge to exit
+# 124, we sweep the stuck remote process, and retry.
+function Invoke-RrunStreamTimed([string]$RemoteHost, [string]$File, [int]$TimeoutSec = 60) {
+  $cmd = 'timeout {0} "$HOME/.local/bin/rrun" {1} "{2}" 2>&1' -f $TimeoutSec, $RemoteHost, (ToWslPath $File)
+  # PS-side 2>&1 is REQUIRED in addition to the bash-side one: remote error text
+  # arrives as a "#< CLIXML" stream, which PowerShell deserializes and re-routes
+  # to its error stream — without this merge it vanishes from the capture.
+  $out = wsl.exe -e bash -c $cmd 2>&1 | Out-String
+  @{ Out = $out; Exit = $LASTEXITCODE }
+}
+# PS 5.1-safe sweep: kill wedged EncodedCommand powershell.exe instances (old
+# enough to be a stuck streamed session, near-zero CPU) so retries start clean.
+$script:sweepCmd = 'Get-CimInstance Win32_Process -Filter "Name=''powershell.exe''" | ForEach-Object { if ($_.ProcessId -ne $PID -and $_.CommandLine -match "EncodedCommand" -and ((Get-Date) - $_.CreationDate).TotalSeconds -gt 45) { $p = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue; if ($p -and $p.TotalProcessorTime.TotalSeconds -lt 1) { Stop-Process -Id $_.ProcessId -Force } } }'
+function Invoke-RrunStreamRetry([string]$RemoteHost, [string]$File, [string]$ShimPath) {
+  $r = $null
+  for ($try = 1; $try -le 3; $try++) {
+    $r = Invoke-RrunStreamTimed $RemoteHost $File
+    if ($r.Exit -ne 124) { return $r }
+    Write-Host "  WARN  streamed session wedged remotely (known Windows-sshd race; see README) — sweeping, retry $try/3"
+    & $ShimPath $RemoteHost -c $script:sweepCmd 2>$null | Out-Null
+  }
+  return $r
+}
+
 Write-Host '[repo sources]'
 wsl.exe -e bash -n (ToWslPath (Join-Path $repo 'bin\rrun')) 2>&1 | Out-Null
 Check 'core syntax (bash -n)' ($LASTEXITCODE -eq 0)
@@ -54,6 +81,12 @@ $out = & $shim local -c 'param([string]$Name = ''rrun-param-ok'') Write-Output "
 Check 'REGRESSION: param() payload runs (payload text never modified)' ($out -match 'p:\[rrun-param-ok\]') $out.Trim()
 $out = & $shim local -c "using namespace System.Text`n[StringBuilder]::new().Append('rrun-using-ok').ToString()" 2>&1 | Out-String
 Check 'REGRESSION: using-namespace payload runs' ($out -match 'rrun-using-ok') $out.Trim()
+# failures must be loud AND non-zero (a swallowed error status defeats the tool)
+$err = & $shim local -c 'no-such-command-xyz' 2>&1 | Out-String
+Check 'REGRESSION: failing local ps payload exits non-zero' ($LASTEXITCODE -ne 0) "exit=$LASTEXITCODE"
+Check 'REGRESSION: local ps failure text visible on stderr' ($err -match 'not recognized') $err.Trim()
+& $shim local -c 'exit 3' 2>$null
+Check 'local ps preserves explicit exit code (3)' ($LASTEXITCODE -eq 3) "exit=$LASTEXITCODE"
 $out = & $shim -s bash local -c 'echo rrun-selftest-ok' 2>&1 | Out-String
 Check 'local bash (via WSL) executes' ($out -match 'rrun-selftest-ok')
 $payloadOut = & $shim -s bash local -c 'V=$(echo armored); echo "sub:$V"' 2>&1 | Out-String
@@ -124,9 +157,19 @@ if ($TargetHost) {
       (1..400 | ForEach-Object { "# padding line $_ to push the payload well past the streaming threshold" })
     $bigFile = Join-Path $tmpDir 'big-payload.ps1'
     [IO.File]::WriteAllText($bigFile, ($lines -join "`n") + "`n")
-    $out = & $shim $TargetHost $bigFile 2>&1 | Out-String
-    Check 'large ps payload streams via stdin (real Windows host)' ($out -match 'got:\[rrun-big-ps-ok\]')
-    Check 'ps streaming payload not re-parsed by remote shell' ($out -notmatch 'not recognized|CommandNotFoundException')
+    $r = Invoke-RrunStreamRetry $TargetHost $bigFile $shim
+    Check 'large ps payload streams via stdin (real Windows host)' ($r.Out -match 'got:\[rrun-big-ps-ok\]')
+    Check 'ps streaming payload not re-parsed by remote shell' ($r.Out -notmatch 'not recognized|CommandNotFoundException')
+    Check 'REGRESSION: streamed ps success exits zero (real host)' ($r.Exit -eq 0) "exit=$($r.Exit)"
+    # a failing streamed payload must also carry its non-zero status back.
+    # exit 124 is the local timeout wrapper (a wedge), NOT the payload's status —
+    # it must never satisfy the non-zero assertion.
+    $failLines = @('no-such-command-xyz') + (1..400 | ForEach-Object { "# padding line $_ to push the payload well past the streaming threshold" })
+    $failFile = Join-Path $tmpDir 'big-fail.ps1'
+    [IO.File]::WriteAllText($failFile, ($failLines -join "`n") + "`n")
+    $r = Invoke-RrunStreamRetry $TargetHost $failFile $shim
+    Check 'REGRESSION: failing streamed ps payload exits non-zero (real host)' ($r.Exit -ne 0 -and $r.Exit -ne 124) "exit=$($r.Exit)"
+    Check 'REGRESSION: streamed ps failure text visible (real host)' ($r.Out -match 'not recognized') $r.Out.Trim()
   }
 }
 Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue

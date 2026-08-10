@@ -20,6 +20,10 @@
 #     auto-switch to streaming the base64 over stdin; the remote payload then
 #     cannot read stdin. Streaming needs a single hop — for big payloads through
 #     intermediaries use -J, which is still one ssh connection.
+#   * KNOWN ISSUE: streamed sessions to a Windows sshd can nondeterministically
+#     wedge remotely before the payload runs (host-side sshd/DefaultShell race,
+#     independent of rrun version and payload — see README caveats). Wrap in a
+#     timeout + retry, or raise RRUN_STREAM_LIMIT on pwsh-DefaultShell hosts.
 #
 # history:
 #   v1            PowerShell -EncodedCommand only, single hop.
@@ -37,6 +41,16 @@
 #                 and runs the decoded source as its own scriptblock. Sources
 #                 are also encoded straight from the file/stdin (a $(cat)
 #                 capture stripped trailing newlines — byte-for-byte now).
+#   v2.3.1 2026-08-10 exit-code fix: v2.3's `& ([scriptblock]::Create(...))`
+#                 masked payload failures — a failing remote ps command exited
+#                 0, so callers/tests couldn't detect it (errors were still
+#                 loud on stderr, but the status lied). The wrapper now appends
+#                 `if (-not $?) { exit 1 }` INSIDE the scriptblock, where $?
+#                 still reflects the payload's last statement, reproducing a
+#                 bare `powershell -Command` exit code exactly (verified across
+#                 PowerShell 5.1 and pwsh 7). Real-host verification surfaced a
+#                 PRE-EXISTING Windows-sshd streamed-session race (A/B-confirmed
+#                 version-independent) — documented in the caveats above.
 #   v2.2.1 2026-08-10 streaming ps bootstrap now travels as -EncodedCommand:
 #                 the bare "-Command iex(...)" form was re-parsed when the remote
 #                 sshd DefaultShell was PowerShell (outer shell evaluated the
@@ -90,7 +104,13 @@ case "$shell" in
     # wrapper sets ProgressPreference (else EncodedCommand with redirected
     # stderr spews "#< CLIXML ... Preparing modules" progress records) and runs
     # the decoded source as its own scriptblock, preserving its lexical start.
-    wrapper="\$ProgressPreference='SilentlyContinue'; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$payload_b64'))))"
+    # The epilogue ("if (-not $?) { exit 1 }") is appended INSIDE the scriptblock
+    # — where $? still reflects the payload's last statement — so a failing
+    # payload exits non-zero just like a bare `powershell -Command` would. The &
+    # operator otherwise masks the failure and rrun would exit 0 on a broken
+    # remote command, hiding errors from callers. [char]10 separates it from the
+    # payload's final line (a trailing comment would otherwise swallow it).
+    wrapper="\$ProgressPreference='SilentlyContinue'; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$payload_b64')) + [char]10 + 'if (-not \$?) { exit 1 }'))"
     b64=$(printf %s "$wrapper" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
     cmd="powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $b64"
     ;;
@@ -128,8 +148,9 @@ if (( ${#hops[@]} == 1 && ${#cmd} > limit )); then
   stream=1
   case "$shell" in
     ps)
-      # same wrapper as above, reading the payload base64 from stdin instead
-      boot="\$ProgressPreference='SilentlyContinue'; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd()))))"
+      # same wrapper as above (incl. the exit-propagation epilogue), reading the
+      # payload base64 from stdin instead
+      boot="\$ProgressPreference='SilentlyContinue'; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd())) + [char]10 + 'if (-not \$?) { exit 1 }'))"
       bootb64=$(printf %s "$boot" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
       cmd="powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $bootb64"
       b64=$payload_b64

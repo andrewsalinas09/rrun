@@ -19,7 +19,9 @@
 #          EXECUTING on dry-run), -c args no longer path-translated, -s validated,
 #          -J rejected for host local; v1.3 local payloads never textually
 #          modified (prefix broke param()/using — scriptblock wrapper instead)
-#          and encoded straight from file/stdin (trailing newlines preserved).
+#          and encoded straight from file/stdin (trailing newlines preserved);
+#          v1.4 wrapper appends `if (-not $?) { exit 1 }` so failing local ps
+#          payloads exit non-zero (the & operator otherwise masked failures).
 set -euo pipefail
 
 xlate() {  # absolute Windows path -> /mnt/<d>/... for WSL
@@ -62,8 +64,10 @@ if [[ $host == local ]]; then
   if [[ $shell == ps ]]; then
     # payload text never modified (a prefix broke param()/using payloads): fixed
     # wrapper sets ProgressPreference (CLIXML progress noise) and runs the
-    # decoded source as its own scriptblock
-    wrapper="\$ProgressPreference='SilentlyContinue'; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$pb64'))))"
+    # decoded source as its own scriptblock. The epilogue exits non-zero when the
+    # payload's last statement failed ($? read INSIDE the scriptblock, where the
+    # & operator hasn't yet masked it) so failures surface to the caller.
+    wrapper="\$ProgressPreference='SilentlyContinue'; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$pb64')) + [char]10 + 'if (-not \$?) { exit 1 }'))"
     b64=$(printf %s "$wrapper" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
     if (( dry )); then
       printf 'powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand %s\n' "$b64"
