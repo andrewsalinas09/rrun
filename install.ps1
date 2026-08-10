@@ -45,27 +45,32 @@ Write-Host '[4/6] Shell integration (~/.bashrc, ~/.bash_profile)'
 $srcLine = '[ -f "$HOME/.rrun/bash_env" ] && . "$HOME/.rrun/bash_env"'
 $block = "# >>> claude-shell-boundary >>>`n$srcLine`n# <<< claude-shell-boundary <<<"
 $blockPat = '(?s)# >>> claude-shell-boundary >>>.*?# <<< claude-shell-boundary <<<'
-$rc = Join-Path $env:USERPROFILE '.bashrc'
-if (Test-Path $rc) {
-  $txt = (Get-Content -Raw $rc) -replace "`r", ''
-  if ($txt -match $blockPat) {
-    # replace between markers so reruns propagate updates (never treat the
-    # marker's mere presence as "already current")
-    $txt = [regex]::Replace($txt, $blockPat, [Text.RegularExpressions.MatchEvaluator] { $block })
+function Set-MarkerBlock([string]$Path) {
+  # replace between markers so reruns propagate updates (never treat the
+  # marker's mere presence as "already current"); append the block if absent
+  if (Test-Path $Path) {
+    $txt = (Get-Content -Raw $Path) -replace "`r", ''
+    if ($txt -match $blockPat) {
+      $txt = [regex]::Replace($txt, $blockPat, [Text.RegularExpressions.MatchEvaluator] { $block })
+    } else {
+      $txt = $txt.TrimEnd("`n") + "`n`n$block`n"
+    }
   } else {
-    $txt = $txt.TrimEnd("`n") + "`n`n$block`n"
+    $txt = "$block`n"
   }
-} else {
-  $txt = "$block`n"
+  [IO.File]::WriteAllText($Path, $txt)
 }
-[IO.File]::WriteAllText($rc, $txt)
+Set-MarkerBlock (Join-Path $env:USERPROFILE '.bashrc')
 $bp = Join-Path $env:USERPROFILE '.bash_profile'
 if (-not (Test-Path $bp)) {
   [IO.File]::WriteAllText($bp, "[ -f ~/.bashrc ] && . ~/.bashrc`n")
   Write-Host '  created ~/.bash_profile -> sources ~/.bashrc'
-} elseif (((Get-Content -Raw $bp) -notmatch '\.bashrc') -and ((Get-Content -Raw $bp) -notmatch '\.rrun')) {
-  [IO.File]::AppendAllText($bp, "`n$srcLine`n")
-  Write-Host '  ~/.bash_profile did not source ~/.bashrc — appended bash_env source line'
+} else {
+  # marker-managed block here too — a content heuristic ("mentions .bashrc")
+  # was fooled by comments like "# we do not source .bashrc here". Sourcing
+  # bash_env twice (via .bashrc AND here) is harmless: it only defines
+  # functions and exports.
+  Set-MarkerBlock $bp
 }
 
 Write-Host '[5/6] User environment variables'

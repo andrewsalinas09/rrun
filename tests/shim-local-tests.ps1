@@ -21,6 +21,15 @@ Check 'REGRESSION: param() payload runs (payload text never modified)' ($out -ma
 $out = & $shim local -c "using namespace System.Text`n[StringBuilder]::new().Append('ci-using-ok').ToString()" 2>&1 | Out-String
 Check 'REGRESSION: using-namespace payload runs' ($out -match 'ci-using-ok') $out.Trim()
 
+# REGRESSION: UTF-16LE .ps1 files (Windows PowerShell's Out-File/> default) must
+# decode as source text, not UTF-8 garbage. The é rides via [char] so this test
+# file itself stays ASCII.
+$u16 = Join-Path $env:TEMP "rrun-ci-u16-$PID.ps1"
+[IO.File]::WriteAllText($u16, ('$s = ' + "'caf$([char]0xE9)'" + '; Write-Output ("u16len:" + $s.Length)'), [Text.Encoding]::Unicode)
+$out = & $shim local $u16 2>&1 | Out-String
+Check 'REGRESSION: UTF-16LE payload file decodes (BOM-aware)' ($out -match 'u16len:4') $out.Trim()
+Remove-Item $u16 -ErrorAction SilentlyContinue
+
 $out = & $shim -n local -c 'Write-Output SHOULD-NOT-RUN' 2>&1 | Out-String
 Check 'REGRESSION: -n local dry-runs, never executes' ($out -notmatch 'SHOULD-NOT-RUN\s*$' -and $out -match 'EncodedCommand')
 

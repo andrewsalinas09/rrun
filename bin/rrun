@@ -51,6 +51,12 @@
 #                 PowerShell 5.1 and pwsh 7). Real-host verification surfaced a
 #                 PRE-EXISTING Windows-sshd streamed-session race (A/B-confirmed
 #                 version-independent) — documented in the caveats above.
+#   v2.3.2 2026-08-10 encoding fix (external review): ps payload bytes were
+#                 unconditionally decoded as UTF-8 remotely, so a UTF-16LE .ps1
+#                 (Windows PowerShell's own Out-File/> default) transported
+#                 byte-perfectly and then parsed as garbage. Both wrappers now
+#                 decode through a BOM-detecting StreamReader (UTF-8/16/32 BOMs
+#                 honored; BOM-less = UTF-8, the documented contract).
 #   v2.2.1 2026-08-10 streaming ps bootstrap now travels as -EncodedCommand:
 #                 the bare "-Command iex(...)" form was re-parsed when the remote
 #                 sshd DefaultShell was PowerShell (outer shell evaluated the
@@ -110,7 +116,11 @@ case "$shell" in
     # operator otherwise masks the failure and rrun would exit 0 on a broken
     # remote command, hiding errors from callers. [char]10 separates it from the
     # payload's final line (a trailing comment would otherwise swallow it).
-    wrapper="\$ProgressPreference='SilentlyContinue'; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$payload_b64')) + [char]10 + 'if (-not \$?) { exit 1 }'))"
+    # Bytes -> text via a BOM-detecting StreamReader, NOT a hardcoded UTF-8
+    # decode: PowerShell 5.1 tooling routinely writes UTF-16LE .ps1 files
+    # (Out-File / > default), which a blind UTF-8 decode turns into garbage.
+    # BOM-less sources are decoded as UTF-8 (the documented contract).
+    wrapper="\$ProgressPreference='SilentlyContinue'; \$__rb=[Convert]::FromBase64String('$payload_b64'); & ([scriptblock]::Create((New-Object IO.StreamReader((New-Object IO.MemoryStream(,\$__rb)),\$true)).ReadToEnd() + [char]10 + 'if (-not \$?) { exit 1 }'))"
     b64=$(printf %s "$wrapper" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
     cmd="powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $b64"
     ;;
@@ -148,9 +158,9 @@ if (( ${#hops[@]} == 1 && ${#cmd} > limit )); then
   stream=1
   case "$shell" in
     ps)
-      # same wrapper as above (incl. the exit-propagation epilogue), reading the
-      # payload base64 from stdin instead
-      boot="\$ProgressPreference='SilentlyContinue'; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd())) + [char]10 + 'if (-not \$?) { exit 1 }'))"
+      # same wrapper as above (incl. the exit-propagation epilogue and the
+      # BOM-detecting decode), reading the payload base64 from stdin instead
+      boot="\$ProgressPreference='SilentlyContinue'; \$__rb=[Convert]::FromBase64String([Console]::In.ReadToEnd()); & ([scriptblock]::Create((New-Object IO.StreamReader((New-Object IO.MemoryStream(,\$__rb)),\$true)).ReadToEnd() + [char]10 + 'if (-not \$?) { exit 1 }'))"
       bootb64=$(printf %s "$boot" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
       cmd="powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $bootb64"
       b64=$payload_b64

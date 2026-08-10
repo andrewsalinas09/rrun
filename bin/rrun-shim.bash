@@ -9,8 +9,10 @@
 #                             everything after -c is opaque data, never touched
 #   * host "local"          : run payload right here — ps -> powershell -EncodedCommand,
 #                             bash/sh -> armored pipe through wsl bash. No ssh.
-#                             Bounded by the 32767-char process command-line limit
-#                             (~12KB ps payload); use a file + -File beyond that.
+#                             Bounded by the 32767-char process command-line limit;
+#                             double base64 (payload b64 inside a UTF-16LE b64
+#                             wrapper) costs ~3.6 chars/byte -> ~9KB ps payload.
+#                             Use powershell -File directly beyond that.
 #   * $HOME trampoline      : `sh -c '... "$@"' rrun args...` expands $HOME inside WSL
 #                             while payload args pass as untouched positional params.
 # usage mirrors WSL rrun:  rrun [-s ps|bash|sh] [-J jumps] [-n] <host[,hop2,...]|local> <script|-|-c "cmds">
@@ -21,7 +23,9 @@
 #          modified (prefix broke param()/using — scriptblock wrapper instead)
 #          and encoded straight from file/stdin (trailing newlines preserved);
 #          v1.4 wrapper appends `if (-not $?) { exit 1 }` so failing local ps
-#          payloads exit non-zero (the & operator otherwise masked failures).
+#          payloads exit non-zero (the & operator otherwise masked failures);
+#          v1.5 BOM-detecting decode (UTF-16LE .ps1 files no longer garbage),
+#          size-limit doc corrected to ~9KB.
 set -euo pipefail
 
 xlate() {  # absolute Windows path -> /mnt/<d>/... for WSL
@@ -67,7 +71,9 @@ if [[ $host == local ]]; then
     # decoded source as its own scriptblock. The epilogue exits non-zero when the
     # payload's last statement failed ($? read INSIDE the scriptblock, where the
     # & operator hasn't yet masked it) so failures surface to the caller.
-    wrapper="\$ProgressPreference='SilentlyContinue'; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$pb64')) + [char]10 + 'if (-not \$?) { exit 1 }'))"
+    # Decode via BOM-detecting StreamReader, not hardcoded UTF-8: PS 5.1 tooling
+    # writes UTF-16LE .ps1 files by default; BOM-less sources decode as UTF-8.
+    wrapper="\$ProgressPreference='SilentlyContinue'; \$__rb=[Convert]::FromBase64String('$pb64'); & ([scriptblock]::Create((New-Object IO.StreamReader((New-Object IO.MemoryStream(,\$__rb)),\$true)).ReadToEnd() + [char]10 + 'if (-not \$?) { exit 1 }'))"
     b64=$(printf %s "$wrapper" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
     if (( dry )); then
       printf 'powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand %s\n' "$b64"

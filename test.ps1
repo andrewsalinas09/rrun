@@ -63,8 +63,13 @@ Check 'multi-hop re-armors per layer' ($out -like 'ssh -o BatchMode=yes h1 ssh*'
 
 Write-Host '[installed: PowerShell shim]'
 $shim = Join-Path $env:USERPROFILE '.local\bin\rrun.ps1'
-$out = (& $shim -n examplehost -c hostname 2>&1) -join ' '
+$out = (& $shim -n examplehost -c hostname 2>$null) -join ' '
 Check 'dry-run via ps shim' ($out -like 'ssh -o BatchMode=yes examplehost powershell*')
+# the notice is written via [Console]::Error.WriteLine, which in-process 2>&1
+# cannot intercept — run the shim as a child powershell so stderr is a real
+# redirectable handle
+$all = (& powershell.exe -NoProfile -File $shim -n examplehost -c hostname 2>&1) -join ' '
+Check 'remote dry-run warns on stderr that output is bash-quoted (stdout clean)' ($all -match 'bash-quoted' -and $out -notmatch 'bash-quoted')
 $out = (& $shim -n local -c 'Write-Output SHOULD-NOT-RUN' 2>&1) -join ' '
 Check 'REGRESSION: -n local dry-runs, never executes' ($out -notmatch 'SHOULD-NOT-RUN\s*$' -and $out -match 'EncodedCommand')
 $tmpDir = Join-Path $env:TEMP "rrun-test-$PID"
@@ -87,6 +92,13 @@ Check 'REGRESSION: failing local ps payload exits non-zero' ($LASTEXITCODE -ne 0
 Check 'REGRESSION: local ps failure text visible on stderr' ($err -match 'not recognized') $err.Trim()
 & $shim local -c 'exit 3' 2>$null
 Check 'local ps preserves explicit exit code (3)' ($LASTEXITCODE -eq 3) "exit=$LASTEXITCODE"
+# REGRESSION: UTF-16LE .ps1 files (Windows PowerShell's Out-File/> default) must
+# decode as source text, not UTF-8 garbage — the wrapper detects BOMs. The é is
+# built with [char] so this test file itself stays pure ASCII.
+$u16File = Join-Path $tmpDir 'u16-payload.ps1'
+[IO.File]::WriteAllText($u16File, ('$s = ' + "'caf$([char]0xE9)'" + '; Write-Output ("u16len:" + $s.Length)'), [Text.Encoding]::Unicode)
+$out = & $shim local $u16File 2>&1 | Out-String
+Check 'REGRESSION: UTF-16LE payload file decodes (ps shim local)' ($out -match 'u16len:4') $out.Trim()
 $out = & $shim -s bash local -c 'echo rrun-selftest-ok' 2>&1 | Out-String
 Check 'local bash (via WSL) executes' ($out -match 'rrun-selftest-ok')
 $payloadOut = & $shim -s bash local -c 'V=$(echo armored); echo "sub:$V"' 2>&1 | Out-String
@@ -105,6 +117,9 @@ if (Test-Path $gitBash) {
   Check 'REGRESSION: bash shim -n local dry-runs' ($out -match 'EncodedCommand')
   $out = & $gitBash -c '"$HOME/.local/bin/rrun" -s bash local -c "echo rrun-selftest-ok"' 2>&1 | Out-String
   Check 'bash shim local mode' ($out -match 'rrun-selftest-ok')
+  $u16Fwd = $u16File -replace '\\', '/'
+  $out = & $gitBash -c ('"$HOME/.local/bin/rrun" local "' + $u16Fwd + '"') 2>&1 | Out-String
+  Check 'REGRESSION: UTF-16LE payload file decodes (bash shim local)' ($out -match 'u16len:4') $out.Trim()
 } else {
   Write-Host '  SKIP  Git Bash not found'
 }
@@ -140,6 +155,11 @@ if ($TargetHost) {
   Write-Host "[remote: $TargetHost]"
   $out = & $shim -s $TargetShell $TargetHost -c 'echo rrun-remote-ok' 2>&1 | Out-String
   Check "real ssh round-trip ($TargetShell)" ($out -match 'rrun-remote-ok')
+  if ($TargetShell -eq 'ps') {
+    # small payload — non-streamed, exercises the remote BOM-aware decode
+    $out = & $shim $TargetHost $u16File 2>&1 | Out-String
+    Check 'REGRESSION: UTF-16LE payload decodes on remote Windows host' ($out -match 'u16len:4') $out.Trim()
+  }
   if ($TargetShell -in @('bash', 'sh')) {
     # large payload -> exercises the stdin-streaming transport end to end
     $lines = @('echo rrun-big-start') + (1..400 | ForEach-Object { "# padding line $_ to push the payload well past the streaming threshold" }) + @('echo rrun-big-ok')

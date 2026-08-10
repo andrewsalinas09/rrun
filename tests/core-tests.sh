@@ -48,7 +48,7 @@ argv
 b64=${ARGV[-1]##* }
 wrapper=$(printf %s "$b64" | base64 -d | iconv -f UTF-16LE -t UTF-8)
 pb64=$(sed -n "s/.*FromBase64String('\([A-Za-z0-9+/=]*\)').*/\1/p" <<<"$wrapper")
-[[ $(printf %s "$pb64" | base64 -d) == 'Get-Date # metachars $x "y"' && $wrapper == "\$ProgressPreference='SilentlyContinue'; & ([scriptblock]::Create("* ]]
+[[ $(printf %s "$pb64" | base64 -d) == 'Get-Date # metachars $x "y"' && $wrapper == "\$ProgressPreference='SilentlyContinue'; \$__rb=[Convert]::FromBase64String("* && $wrapper == *'scriptblock'* ]]
 check 'ps payload survives untouched inside scriptblock wrapper' $?
 
 # REGRESSION: the wrapper must carry the exit-propagation epilogue, else a
@@ -56,6 +56,12 @@ check 'ps payload survives untouched inside scriptblock wrapper' $?
 # can't tell success from failure — the whole point of a transport tool.
 [[ $wrapper == *'if (-not $?) { exit 1 }'* ]]
 check 'ps wrapper propagates payload failure (exit-code epilogue present)' $?
+
+# REGRESSION: payload bytes must be decoded BOM-aware, not hardcoded UTF-8 —
+# Windows PowerShell's own Out-File/> default is UTF-16LE, which a blind UTF-8
+# decode turns to garbage after a byte-perfect transport.
+[[ $wrapper == *'StreamReader'* && $wrapper == *'MemoryStream'* && $wrapper != *'UTF8.GetString'* ]]
+check 'ps wrapper decodes via BOM-detecting StreamReader' $?
 
 # REGRESSION: payload text must NEVER be modified — a prepended statement broke
 # param()/using payloads (must be a script's first statements) — and must keep
@@ -94,8 +100,8 @@ argv
 decoded=$(base64 -d < "$STUB_OUT.stdin")
 bootb64=$(sed -n 's/^powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand \([A-Za-z0-9+/=]*\)$/\1/p' <<<"${ARGV[-1]}")
 boot=$(printf %s "$bootb64" | base64 -d | iconv -f UTF-16LE -t UTF-8)
-[[ -n $bootb64 && $boot == *'FromBase64String([Console]::In.ReadToEnd())'* && $boot == *scriptblock* && $boot == *'if (-not $?) { exit 1 }'* && $decoded == 'Get-BigThing' ]]
-check 'large ps payload streams behind fixed scriptblock bootstrap (with exit epilogue)' $?
+[[ -n $bootb64 && $boot == *'FromBase64String([Console]::In.ReadToEnd())'* && $boot == *scriptblock* && $boot == *'if (-not $?) { exit 1 }'* && $boot == *'StreamReader'* && $decoded == 'Get-BigThing' ]]
+check 'large ps payload streams behind fixed scriptblock bootstrap (with exit epilogue + BOM-aware decode)' $?
 
 # REGRESSION: the ps streaming bootstrap must be INERT in the remote sshd shell
 # (cmd, PowerShell via DefaultShell, or a POSIX sh). A bare "-Command iex(...)"

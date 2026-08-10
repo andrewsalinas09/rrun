@@ -5,8 +5,9 @@
 #   * script operand  : ONLY the script-source arg is translated C:\x -> /mnt/c/x;
 #                       everything after -c is opaque data, never touched
 #   * host "local"    : ps -> powershell.exe -EncodedCommand here; bash/sh -> wsl bash.
-#                       Bounded by the 32767-char process command-line limit
-#                       (~12KB ps payload); use a file + -File beyond that.
+#                       Bounded by the 32767-char process command-line limit;
+#                       double base64 costs ~3.6 chars/byte -> ~9KB ps payload.
+#                       Use powershell -File directly beyond that.
 #   * $HOME trampoline: sh -c '... "$@"' expands $HOME inside WSL; payload args pass
 #                       as untouched positional params (no hardcoded WSL username).
 # usage mirrors WSL rrun:  rrun [-s ps|bash|sh] [-J jumps] [-n] <host[,hop2,...]|local> <script|-|-c "cmds">
@@ -18,7 +19,9 @@
 #          v1.4 local ps payloads never textually modified (prefix broke
 #          param()/using — scriptblock wrapper instead); v1.5 wrapper appends
 #          `if (-not $?) { exit 1 }` so failing local ps payloads exit non-zero
-#          (the & operator otherwise swallowed the failure -> false success).
+#          (the & operator otherwise swallowed the failure -> false success);
+#          v1.6 remote dry-run prints a stderr notice that the output is
+#          bash-quoted (not PowerShell paste-safe); ~9KB size doc fix.
 $ErrorActionPreference = 'Stop'
 
 function Fail([string]$msg) {
@@ -95,6 +98,12 @@ if ($hostSpec -eq 'local') {
 # path. Arguments following -c (and "-") are opaque payload data — never touched.
 if ($rest[0] -ne '-c' -and $rest[0] -ne '-' -and (Test-Path -LiteralPath $rest[0] -PathType Leaf)) {
   $rest[0] = ToWsl $rest[0]
+}
+if ($dry) {
+  # the core renders dry-runs with bash %q quoting — paste-safe for bash/WSL,
+  # NOT for PowerShell (backslash escapes mean nothing here, so a metachar arg
+  # could re-parse). Warn on stderr; stdout stays machine-parseable.
+  [Console]::Error.WriteLine('rrun: dry-run below is bash-quoted (run it from bash/WSL; not PowerShell paste-safe)')
 }
 & wsl.exe -e sh -c 'exec "$HOME/.local/bin/rrun" "$@"' rrun @opts $hostSpec @rest
 exit $LASTEXITCODE
