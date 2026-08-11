@@ -11,7 +11,15 @@
 #
 # The sender runs bin/rrun under GIT BASH on the host (itself an axis: MSYS
 # userland, no WSL). Exit code = failures.
-param()
+#
+# -Mode splits the lane so CI can GATE on what is deterministic (external-
+# review round 11, finding 5):
+#   deterministic  small + UTF-16LE cells; no streaming, no wedge race -> the
+#                  required CI job
+#   stress         streamed-large cells; reproduces the documented Windows-sshd
+#                  wedge race with retries -> the advisory CI job
+#   all            both (local runs)
+param([ValidateSet('all', 'deterministic', 'stress')][string]$Mode = 'all')
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 
@@ -69,6 +77,7 @@ try {
     }
   }
   $triples = @($variants | ForEach-Object { "$($_.Name):$($_.Port):$($_.Shell)" })
+  $env:WIN_LANE_MODE = $Mode
   & "$env:ProgramFiles\Git\bin\bash.exe" win-sender.sh $tmp @triples
   $rc = $LASTEXITCODE
 } finally {

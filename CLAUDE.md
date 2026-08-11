@@ -18,9 +18,15 @@ On Windows (with WSL + Git Bash):
 
 On a pure-Linux machine: copy `bin/rrun` to `~/.local/bin/`, `chmod +x` — done.
 
-To remove everything: `& <repo>\uninstall.ps1` — reverses all six install steps
-(only rrun's own settings.json entry and env values; user-owned config
-survives), self-checks, and exits non-zero if anything rrun-shaped remains.
+To remove everything: `& <repo>\uninstall.ps1` — reverses the install using the
+ownership manifest `install.ps1` recorded before modifying anything
+(`~/.rrun/install-state.json`): env vars are restored to their pre-install
+values only if still untouched since rrun set them, the PATH entry and a
+created `.bash_profile` are removed only when the manifest proves rrun made
+them, and hook removal is per-handler by exact identity (other handlers in the
+same matcher group survive). Without a manifest it removes only what is
+provably rrun's and leaves the rest with instructions. Self-checks; exits
+non-zero if anything rrun-shaped remains.
 
 ## 2. Rules of engagement once installed (offer these to the user for their global CLAUDE.md — their call)
 
@@ -87,8 +93,11 @@ per new environment suspicion — cells are one `scenario` line.
 cmd/powershell/pwsh `DefaultShell` selected per cell; sender = the core under
 Git Bash (MSYS), no WSL. It reproduced the streamed-wedge race on demand (on
 cmd gateways too, not just pwsh), and proved 5.1 gateways flatten exit codes
-like pwsh. Needs the docker Windows engine locally (Containers + Hyper-V,
-`DockerCli -SwitchDaemon`); runs in CI on `windows-2022`. Its construction
+like pwsh (pinned as an assertion since 2.7.0, both editions). Needs the
+docker Windows engine locally (Containers + Hyper-V, `DockerCli
+-SwitchDaemon`); in CI split by `-Mode` since 2.7.0: `win-matrix`
+(deterministic cells, REQUIRED) and `win-matrix-stress` (streamed-wedge
+cells, advisory) on `windows-2022`. Its construction
 gotchas (WinNAT, docker cp vs Hyper-V, Git Bash ssh ignoring $HOME,
 administrators_authorized_keys OWNERSHIP) are comments at their point of use.
 

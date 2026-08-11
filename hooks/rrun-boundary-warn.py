@@ -33,6 +33,9 @@ PYTHON, NOT JQ
     if there is none.
 
 history: v1.0 2026-08-10 created (external-review round 10).
+         v1.1 2026-08-11 (round 11, finding 8) NESTED_SSH no longer fires on
+         two independent sequential ssh commands -- the second ssh must now be
+         inside the quote the first one opens.
 """
 import json
 import re
@@ -44,8 +47,14 @@ import sys
 WSL = re.compile(r"(?<![A-Za-z0-9_./-])wsl(\.exe)?(\s|$)")
 # A POSIX shell handed a command string, or used as the -e target of wsl.
 SHELL = re.compile(r"(-e\s+(ba|z)?sh(\s|$)|(ba|z)?sh\s+-[A-Za-z]*c(\s|$))")
-# An ssh whose remote command itself invokes ssh (a quote sits between them).
-NESTED_SSH = re.compile(r"ssh\s.*[\"'].*ssh\s")
+# An ssh whose remote command itself invokes ssh: the second ssh must sit
+# INSIDE the quote opened by the first ssh's arguments. The old form
+# (ssh\s.*["'].*ssh\s) also matched two independent sequential commands
+# (`ssh a 'date'; ssh b uptime`), because .* happily crossed the closing quote
+# and a command separator. Now: no quote/separator may appear between the
+# first ssh and its opening quote, and the second ssh must appear before that
+# same quote closes ((?:(?!\1).)* cannot cross the closing quote).
+NESTED_SSH = re.compile(r"ssh\s[^\"';|&]*([\"'])(?:(?!\1).)*ssh\s")
 # powershell/pwsh handed a command string from inside another shell.
 PS_COMMAND = re.compile(
     r"(?<![A-Za-z0-9_./-])(powershell|pwsh)(\.exe)?\s.*(-Command|-c)\s"

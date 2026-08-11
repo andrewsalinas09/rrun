@@ -92,8 +92,15 @@ the core runs with no WSL anywhere.
 Requirements: docker Windows engine — locally that means the Containers +
 Microsoft-Hyper-V features and `DockerCli.exe -SwitchDaemon` (the Linux lane
 is unaffected: WSL integration always talks to the Linux engine); GitHub's
-`windows-2022` runner has it natively and runs this lane as the `win-matrix`
-CI job with process isolation.
+`windows-2022` runner has it natively. Since 2.7.0 the lane is **split by
+`-Mode`** so CI can gate on what is deterministic: `win-matrix` runs
+`-Mode deterministic` (small + UTF-16LE cells, no streaming so the wedge race
+cannot flake it) as a **required** job, and `win-matrix-stress` runs
+`-Mode stress` (the streamed-large cells that deliberately walk into the
+wedge race, with retries) as an advisory `continue-on-error` job. The
+PowerShell-gateway exit-code flattening (`exit 5 -> 1` on 5.1 AND pwsh;
+`exit 5 -> 5` on cmd) is **pinned as an assertion** in both modes — if a
+future OpenSSH/PowerShell restores fidelity, CI says so loudly.
 
 First-run findings:
 - **The streamed-session wedge race reproduces on demand** — on every
@@ -128,8 +135,8 @@ substitution, which blocks until every pipe writer exits, and an MSYS
 session. Attempt output now goes to files (control returns when the timeout
 fires), the sweep clears the remote side between tries, and container boots
 are staggered with one retry (simultaneous Hyper-V starts can kill a
-container at boot). The CI job is `continue-on-error` with a hard
-`timeout-minutes` until a characterized green run promotes it.
+container at boot). Only the stress half stays `continue-on-error` (with a
+hard `timeout-minutes`); the deterministic half gates.
 
 ## Known gaps (planned lanes)
 

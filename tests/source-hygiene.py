@@ -23,6 +23,15 @@ corresponding bug actually shipped.
 
 3. No hardcoded home paths in shipped sources.
    They must resolve $HOME / %USERPROFILE% at runtime.
+
+4. Normative docs must not teach the abandoned transport.
+   The `echo <b64> | base64 -d | bash` pipeline and the `exec bash -c` hop
+   layer were both PROVEN unsafe by this project (silent success on decoder
+   failure, 2.3.3; bash required by name on every hop, 2.5.0) and replaced --
+   yet the README's design section kept teaching them for months of review
+   rounds. Agents are explicitly told to learn the architecture from README,
+   so a stale claim there reproduces the unsafe design in re-derivations.
+   Historical changelog text is exempt (it describes what USED to happen).
 """
 import glob
 import os
@@ -67,6 +76,19 @@ for f in sorted(glob.glob("bin/*") + glob.glob("hooks/*")):
     raw = open(f, "rb").read()
     hits = PAT.findall(raw)
     check(not hits, f, "hardcoded: %r" % (hits[:3],))
+
+print("[normative docs do not teach the abandoned transport]")
+STALE = re.compile(rb"base64 -d \| (ba|z)?sh\b|exec bash -c")
+for f in ["README.md", "test.ps1", "CLAUDE.md", "tests/matrix/README.md"]:
+    if not os.path.exists(f):
+        continue
+    raw = open(f, "rb").read()
+    if f == "README.md":
+        # everything above the changelog is normative; the changelog quotes
+        # history and may (must, even) describe the old broken pipeline
+        raw = raw.split(b"## Changelog")[0]
+    hits = STALE.findall(raw)
+    check(not hits, f, "stale transport claim (pipe-to-shell / exec bash -c): %r" % (hits[:3],))
 
 print("")
 if fails:

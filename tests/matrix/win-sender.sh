@@ -7,9 +7,19 @@
 #
 # argv: <tmp_windows_path> <name:port:gateway>...
 # Exit code = failures. Gateways: cmd expects EXACT exit codes; powershell /
-# pwsh cells PROBE exit-code fidelity (Linux pwsh flattens to 1 -- whether
-# Windows PowerShell 5.1 does too is exactly what this lane measures).
+# pwsh gateways are PINNED to the measured family behavior (non-zero flattens
+# to 1, README-documented) -- an assertion, not a probe, so a future
+# OpenSSH/PowerShell that fixes the fidelity flips the cell loudly.
+#
+# WIN_LANE_MODE selects which cells run (default: all):
+#   deterministic  small + UTF-16LE payloads only -- no streaming, so no wedge
+#                  race; this is the CI-REQUIRED lane
+#   stress         streamed-large payloads only -- exercises the documented
+#                  nondeterministic Windows-sshd wedge race with retries;
+#                  CI-advisory
 set -uo pipefail
+MODE=${WIN_LANE_MODE:-all}
+echo "mode: $MODE"
 tmpw=$1; shift
 tmp=$(cygpath -u "$tmpw")
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -67,6 +77,7 @@ for triple in "$@"; do
   check "$name: sshd reachable (host key learned)" $((1-ok))
   [[ $ok == 1 ]] || continue
 
+  if [[ $MODE == all || $MODE == deterministic ]]; then
   # small ps payload: output + exit-code fidelity through this gateway
   p="$tmp/p-$name.ps1"
   printf 'Write-Output "WMX-%s"\nexit 5\n' "$name" > "$p"
@@ -82,7 +93,11 @@ for triple in "$@"; do
   if [[ $gw == cmd ]]; then
     [[ $rc == 5 ]]; check "$name: exact exit code 5 through cmd gateway" $?
   else
-    note "PROBE $name: exit code through $gw gateway = $rc (payload exited 5)"
+    # PINNED family behavior (matrix-measured on 5.1 AND pwsh, README-
+    # documented): a PowerShell gateway flattens non-zero exit codes to 1.
+    # If a future version preserves codes, this fails loudly -- update the
+    # README caveat and this pin together.
+    [[ $rc == 1 ]]; check "$name: exit 5 flattens to 1 through $gw gateway (pinned documented behavior)" $?
   fi
 
   # UTF-16LE (BOM) payload file: the remote BOM-aware decode against a REAL
@@ -93,7 +108,9 @@ for triple in "$@"; do
   timeout 60 bash "$RRUN" "$name" "$u16" > "$tmp/out-$name" 2>/dev/null; rc=$?
   out=$(cat "$tmp/out-$name")
   [[ $out == *"WMX-u16-$name"* ]]; check "$name: UTF-16LE payload file decodes remotely" $?
+  fi
 
+  if [[ $MODE == all || $MODE == stress ]]; then
   # large payload -> the streaming path. The documented Windows-sshd wedge
   # race makes this nondeterministic: timeout + retry, wedges counted LOUDLY
   # (this lane is where the race finally becomes reproducible-by-anyone).
@@ -124,7 +141,10 @@ for triple in "$@"; do
   if [[ $gw == cmd ]]; then
     [[ $rc == 7 ]]; check "$name: streamed exit code 7 through cmd gateway" $?
   else
-    note "PROBE $name: streamed exit code through $gw gateway = $rc (payload exited 7)"
+    # pinned, same as the small-payload cell: PowerShell-family gateways
+    # flatten non-zero to 1 (README-documented)
+    [[ $rc == 1 ]]; check "$name: streamed exit 7 flattens to 1 through $gw gateway (pinned documented behavior)" $?
+  fi
   fi
 done
 

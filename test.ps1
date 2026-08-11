@@ -7,9 +7,10 @@
 param(
   [string]$TargetHost = '',
   [string]$TargetShell = 'bash',
-  # e.g. -TargetHops 'pi,localhost' -- a real nested chain (needs each hop able
-  # to ssh to the next, with a POSIX login shell + base64 + bash on the
-  # intermediates; the hop layer runs `exec bash -c`)
+  # e.g. -TargetHops 'pi,localhost' -- a real nested chain (each hop must be
+  # able to ssh to the next; hosts 2..N, final included, need a POSIX login
+  # shell + base64 + sh -- the hop layer runs `exec sh -c`, bash required
+  # nowhere since 2.5.0)
   [string]$TargetHops = ''
 )
 $ErrorActionPreference = 'Continue'
@@ -205,7 +206,9 @@ if ($py) {
   Check 'tests/source-hygiene.py all pass (ASCII .ps1, LF, no hardcoded paths)' ($LASTEXITCODE -eq 0)
 }
 & (Join-Path $repo 'tests\hook-install-tests.ps1') | Out-Null
-Check 'tests/hook-install-tests.ps1 all pass (settings.json merge is safe)' ($LASTEXITCODE -eq 0)
+Check 'tests/hook-install-tests.ps1 all pass (settings.json merge/removal is safe)' ($LASTEXITCODE -eq 0)
+& (Join-Path $repo 'tests\install-state-tests.ps1') | Out-Null
+Check 'tests/install-state-tests.ps1 all pass (ownership manifest + env restore)' ($LASTEXITCODE -eq 0)
 
 if ($TargetHost) {
   Write-Host "[remote: $TargetHost]"

@@ -23,22 +23,31 @@ jobs:
       - name: Environment matrix (docker + container-to-container ssh)
         run: bash tests/matrix/matrix.sh
   # the axes Linux containers cannot host: real PowerShell 5.1, real Windows
-  # sshd, cmd.exe limits, the streamed-wedge race (reproduced here). Runner
+  # sshd, cmd.exe limits, the PowerShell-gateway exit-code pins. Runner
   # ltsc2022 matches the servercore base, so containers use process isolation.
-  # ADVISORY for now (continue-on-error): the lane works -- it reproduced the
-  # streamed-wedge race and measured both gateway findings -- but wedge BURSTS
-  # make wall-time and flake rate unpredictable, and the burst-hang fix
-  # (file-redirected attempt output) has not yet had a full green local run.
-  # timeout-minutes is a hard backstop; promote to required once characterized.
+  # REQUIRED: this half of the lane never streams, so the wedge race cannot
+  # flake it -- a failure here is a real Windows-sshd regression.
   win-matrix:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Windows-container matrix lane (deterministic cells)
+        shell: pwsh
+        run: ./tests/matrix/matrix-win.ps1 -Mode deterministic
+  # ADVISORY (continue-on-error): the streamed-large cells deliberately walk
+  # into the documented nondeterministic Windows-sshd wedge race -- wedge
+  # BURSTS make wall-time and flake rate unpredictable, so this stays a
+  # characterization lane, not a gate. timeout-minutes is a hard backstop.
+  win-matrix-stress:
     runs-on: windows-2022
     continue-on-error: true
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-      - name: Windows-container matrix lane
+      - name: Windows-container matrix lane (streamed-wedge stress)
         shell: pwsh
-        run: ./tests/matrix/matrix-win.ps1
+        run: ./tests/matrix/matrix-win.ps1 -Mode stress
   windows-shim:
     runs-on: windows-latest
     steps:
@@ -53,10 +62,21 @@ jobs:
       - name: PowerShell shim local-mode tests (Windows PowerShell 5.1)
         shell: powershell
         run: ./tests/shim-local-tests.ps1
-      # settings.json merge safety — runs against throwaway config dirs
-      - name: Hook installer tests (settings.json merge)
+      # settings.json merge/removal safety — runs against throwaway config dirs
+      - name: Hook installer + remover tests (settings.json merge)
         shell: pwsh
         run: ./tests/hook-install-tests.ps1
+      - name: Hook installer + remover tests (Windows PowerShell 5.1)
+        shell: powershell
+        run: ./tests/hook-install-tests.ps1
+      # ownership manifest + env-restore decision table + Invoke-Native guard;
+      # the Invoke-Native case only means something under 5.1, so run both
+      - name: Install-state tests (pwsh 7)
+        shell: pwsh
+        run: ./tests/install-state-tests.ps1
+      - name: Install-state tests (Windows PowerShell 5.1)
+        shell: powershell
+        run: ./tests/install-state-tests.ps1
       # Windows PowerShell 5.1 is the default powershell.exe everywhere and reads
       # BOM-less .ps1 as ANSI -- every shipped .ps1 must parse under IT, not just
       # under pwsh 7. This is the exact failure that broke a remote install.

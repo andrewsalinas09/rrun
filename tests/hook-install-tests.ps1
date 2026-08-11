@@ -1,11 +1,16 @@
-# hook-install-tests.ps1 -- regression suite for hooks/install-hook.ps1.
+# hook-install-tests.ps1 -- regression suite for hooks/install-hook.ps1 AND its
+# removal counterpart hooks/uninstall-hook.ps1.
 #
-# This is the one part of rrun's install that edits a file the USER owns and may
-# have hand-tuned. "It merged cleanly" therefore has to be a test, not a promise.
-# Everything runs against throwaway config dirs; the real ~/.claude is untouched.
+# This is the one part of rrun's lifecycle that edits a file the USER owns and
+# may have hand-tuned. "It merged cleanly" therefore has to be a test, not a
+# promise. Everything runs against throwaway config dirs; ~/.claude is untouched.
 $ErrorActionPreference = 'Continue'
 $repo = Split-Path $PSScriptRoot -Parent
 $installer = Join-Path $repo 'hooks\install-hook.ps1'
+$remover = Join-Path $repo 'hooks\uninstall-hook.ps1'
+# must stay byte-identical to what install-hook.ps1 wires -- used to plant
+# realistic pre-existing rrun handlers inside shared groups
+$rrunCmd = 'bash "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/rrun-boundary-warn.sh"'
 $fail = 0
 
 function Check([string]$name, [bool]$ok, [string]$detail = '') {
@@ -74,8 +79,111 @@ $d = NewDir
 $threw = $false
 try { & $installer -ConfigDir $d -RepoRoot $repo -Quiet 2>$null } catch { $threw = $true }
 Check 'refuses to guess, throws instead of clobbering' $threw
-Check 'backup taken before the throw' (Test-Path (Join-Path $d 'settings.json.rrun-bak'))
+Check 'REGRESSION: corrupt file is NOT backed up (would clobber a good backup)' (-not (Test-Path (Join-Path $d 'settings.json.rrun-bak')))
 Check 'original left intact' ((Get-Content -Raw (Join-Path $d 'settings.json')).Trim() -eq '{ this is not json')
+Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue
+
+Write-Host '[corrupt settings must not destroy the last GOOD backup]'
+# The failure sequence this guards: settings valid -> rrun runs (good backup
+# exists) -> settings later corrupted -> rerun. The old code copied the corrupt
+# file over the good backup BEFORE parsing -- destroying the recovery copy at
+# exactly the moment it was needed.
+$d = NewDir
+'{ "model": "opus" }' | Set-Content -Path (Join-Path $d 'settings.json') -Encoding UTF8
+& $installer -ConfigDir $d -RepoRoot $repo -Quiet
+$bak = Join-Path $d 'settings.json.rrun-bak'
+Check 'good backup exists after a clean run' ((Get-Content -Raw $bak | ConvertFrom-Json).model -eq 'opus')
+'{ truncated garba' | Set-Content -Path (Join-Path $d 'settings.json') -Encoding UTF8
+$threw = $false
+try { & $installer -ConfigDir $d -RepoRoot $repo -Quiet 2>$null } catch { $threw = $true }
+Check 'rerun on corrupt settings throws' $threw
+Check 'REGRESSION: good backup survives the corrupt rerun (install)' ((Get-Content -Raw $bak | ConvertFrom-Json).model -eq 'opus')
+$threw = $false
+try { & $remover -ConfigDir $d -Quiet 2>$null } catch { $threw = $true }
+Check 'uninstall on corrupt settings throws' $threw
+Check 'REGRESSION: good backup survives the corrupt rerun (uninstall)' ((Get-Content -Raw $bak | ConvertFrom-Json).model -eq 'opus')
+Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue
+
+Write-Host '[shared matcher group: other handlers survive install AND uninstall]'
+# A user may legitimately append their own handler to OUR matcher group. The
+# old code treated any group containing an rrun-matching handler as wholly
+# rrun's and dropped it -- deleting the user's handler on update or uninstall.
+$d = NewDir
+# built from objects, not string templating: $rrunCmd contains "$"/quotes that
+# regex-replacement rules would mis-handle
+[pscustomobject]@{
+  hooks = [pscustomobject]@{
+    PreToolUse = @([pscustomobject]@{
+      matcher = 'Bash|PowerShell'
+      hooks   = @(
+        [pscustomobject]@{ type = 'command'; command = 'echo KEEP-ME' },
+        [pscustomobject]@{ type = 'command'; shell = 'bash'; command = $rrunCmd; timeout = 10 }
+      )
+    })
+  }
+} | ConvertTo-Json -Depth 10 | Set-Content -Path (Join-Path $d 'settings.json') -Encoding UTF8
+& $installer -ConfigDir $d -RepoRoot $repo -Quiet
+$j = ReadJson $d
+$allCmds = @($j.hooks.PreToolUse | ForEach-Object { @($_.hooks) } | ForEach-Object { "$($_.command)" })
+Check 'REGRESSION: co-tenant handler survives self-update' ($allCmds -contains 'echo KEEP-ME')
+Check 'exactly one rrun handler after self-update' (@($allCmds | Where-Object { $_ -eq $rrunCmd }).Count -eq 1)
+& $remover -ConfigDir $d -Quiet
+$j = ReadJson $d
+$allCmds = @(@($j.hooks.PreToolUse) | ForEach-Object { @($_.hooks) } | ForEach-Object { "$($_.command)" })
+Check 'REGRESSION: co-tenant handler survives uninstall' ($allCmds -contains 'echo KEEP-ME')
+Check 'rrun handler gone after uninstall' (@($allCmds | Where-Object { $_ -eq $rrunCmd }).Count -eq 0)
+Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue
+
+Write-Host '[namespace collision: similar-named foreign handler is never ours]'
+# Ownership is exact command identity, not substring: a foreign handler whose
+# command merely CONTAINS 'rrun-boundary-warn' must survive both operations.
+$d = NewDir
+@'
+{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "/opt/audit/rrun-boundary-warn-logger --tee" }] }
+    ]
+  }
+}
+'@ | Set-Content -Path (Join-Path $d 'settings.json') -Encoding UTF8
+& $installer -ConfigDir $d -RepoRoot $repo -Quiet
+$j = ReadJson $d
+$lookalike = @($j.hooks.PreToolUse | ForEach-Object { @($_.hooks) } | Where-Object { "$($_.command)" -match 'logger' })
+Check 'REGRESSION: lookalike foreign handler survives install' (@($lookalike).Count -eq 1)
+& $remover -ConfigDir $d -Quiet
+$j = ReadJson $d
+$lookalike = @(@($j.hooks.PreToolUse) | ForEach-Object { @($_.hooks) } | Where-Object { "$($_.command)" -match 'logger' })
+Check 'REGRESSION: lookalike foreign handler survives uninstall' (@($lookalike).Count -eq 1)
+Check 'our entry really was removed around it' (-not ((Get-Content -Raw (Join-Path $d 'settings.json')) -match 'rrun-boundary-warn\.sh'))
+Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue
+
+Write-Host '[uninstall round-trip on a hand-tuned config]'
+$d = NewDir
+@'
+{
+  "model": "opus",
+  "permissions": { "allow": ["Read"] },
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Write", "hooks": [{ "type": "command", "command": "echo someone-elses-hook" }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "Edit", "hooks": [{ "type": "command", "command": "prettier --write" }] }
+    ]
+  }
+}
+'@ | Set-Content -Path (Join-Path $d 'settings.json') -Encoding UTF8
+& $installer -ConfigDir $d -RepoRoot $repo -Quiet
+& $remover -ConfigDir $d -Quiet
+$j = ReadJson $d
+Check 'rrun entry gone' (@(OurEntries $j).Count -eq 0)
+Check "someone else's PreToolUse group untouched" (@(@($j.hooks.PreToolUse) | Where-Object { $_.matcher -eq 'Write' }).Count -eq 1)
+Check 'PostToolUse untouched' ($j.hooks.PostToolUse[0].hooks[0].command -eq 'prettier --write')
+Check 'unrelated top-level keys untouched' ($j.model -eq 'opus' -and @($j.permissions.allow).Count -eq 1)
+Check 'hook files removed' (-not ((Test-Path (Join-Path $d 'hooks\rrun-boundary-warn.sh')) -or (Test-Path (Join-Path $d 'hooks\rrun-boundary-warn.py'))))
+Check 'idempotent: second uninstall is a no-op' ($(& $remover -ConfigDir $d -Quiet; $?))
 Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue
 
 Write-Host ''

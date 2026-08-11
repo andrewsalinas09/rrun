@@ -37,6 +37,8 @@ MUST_WARN = [
     ("MSYS_NO_PATHCONV=1 wsl.exe -e sh -c 'command -v jq'", "wsl"),
     ("ssh pi \"ssh -o BatchMode=yes localhost echo ok\"", "nested ssh"),
     ("ssh -o BatchMode=yes pi 'ssh andrew hostname'", "nested ssh"),
+    # nesting still detected when the inner ssh is not the first word quoted
+    ("ssh gw 'cd /srv && ssh app systemctl restart api'", "nested ssh"),
     ("powershell -Command \"& { Get-Date }\"", "nested pwsh"),
     ("pwsh -c 'Get-Process | Sort CPU'", "nested pwsh"),
 ]
@@ -66,6 +68,12 @@ MUST_BE_SILENT = [
     # a single ssh is fine -- only NESTED ssh is the pattern
     "ssh pi 'uname -s'",
     "ssh -o BatchMode=yes pi hostname",
+    # SEQUENTIAL independent ssh commands are not nested ssh: the second ssh
+    # sits OUTSIDE the first one's quotes (v1.1 regression -- the old regex
+    # let .* cross the closing quote and the separator)
+    "ssh a 'date'; ssh b uptime",
+    "ssh pi uname && ssh andrew hostname",
+    "ssh a; grep \"ssh \" log.txt",
     # substrings that must not trip the word-boundary guards
     "cat /mnt/c/tools/wslfoo/bash-notes.txt",
     "./sshkeys/rotate.sh --dry-run",

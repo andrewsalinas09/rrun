@@ -6,13 +6,23 @@
 #
 # Contract:
 #   * merges -- never rewrites settings.json wholesale; unrelated keys, and other
-#     people's hooks (including other PreToolUse entries), survive untouched
-#   * idempotent -- identifies its own entry by the script name in the command,
-#     so re-running updates in place instead of stacking duplicates
-#   * backs up to settings.json.rrun-bak before touching an existing file
-#   * refuses to guess on malformed JSON: throws with the backup path
+#     people's hooks (including other PreToolUse entries, and other handlers
+#     sharing OUR matcher group), survive untouched
+#   * idempotent -- identifies its own handler by EXACT command equality, so
+#     re-running updates in place instead of stacking duplicates, and a foreign
+#     handler that merely mentions 'rrun-boundary-warn' is never treated as ours
+#   * backs up to settings.json.rrun-bak only AFTER the existing file parses,
+#     so a corrupt settings.json can never overwrite the last good backup
+#   * refuses to guess on malformed JSON: throws, pointing at any prior backup
+#   * rewritten JSON is re-parsed from a temp file, then atomically replaces
+#     settings.json
 #
 # history: v1.0 2026-08-10 created (external-review round 10).
+#          v1.1 2026-08-11 (round 11, findings 2+3) self-update filters
+#          handlers individually instead of dropping any group containing a
+#          substring match (which deleted other people's handlers from a shared
+#          group); backup moved after validation; temp-file + re-parse + atomic
+#          replace on write. Removal counterpart: uninstall-hook.ps1.
 param(
   [Parameter(Mandatory = $true)][string]$ConfigDir,
   [Parameter(Mandatory = $true)][string]$RepoRoot,
@@ -35,13 +45,17 @@ $hookCmd = 'bash "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/rrun-boundary-warn.s
 
 $settings = [pscustomobject]@{}
 if (Test-Path $settingsPath) {
-  Copy-Item $settingsPath "$settingsPath.rrun-bak" -Force
   $raw = (Get-Content -Raw $settingsPath).Trim()
   if ($raw) {
     try { $settings = $raw | ConvertFrom-Json } catch {
-      throw "settings.json is not valid JSON ($settingsPath) -- fix or move it, then re-run. Backup: $settingsPath.rrun-bak"
+      # do NOT refresh the backup here: settings.json is corrupt, and copying
+      # it over .rrun-bak would destroy the last known-good copy at exactly
+      # the moment the user needs it
+      $note = if (Test-Path "$settingsPath.rrun-bak") { " The previous good backup at $settingsPath.rrun-bak was left untouched." } else { '' }
+      throw "settings.json is not valid JSON ($settingsPath) -- fix or move it, then re-run.$note"
     }
   }
+  Copy-Item $settingsPath "$settingsPath.rrun-bak" -Force
 }
 
 function Get-Prop($o, $n) { if ($o.PSObject.Properties.Name -contains $n) { $o.$n } else { $null } }
@@ -58,13 +72,21 @@ $entry = [pscustomobject]@{
 $hooksObj = Get-Prop $settings 'hooks'
 if (-not $hooksObj) { $hooksObj = [pscustomobject]@{} }
 $pre = @(@(Get-Prop $hooksObj 'PreToolUse') | Where-Object { $_ })
-# Drop only OUR previous entry (self-updating); everyone else's stays.
-$kept = @($pre | Where-Object {
-  -not (@($_.hooks) | Where-Object { "$($_.command)" -match 'rrun-boundary-warn' })
+# Drop only OUR previous handler (self-updating), by exact command identity,
+# filtering handler-by-handler: a group that also carries someone else's
+# handler keeps that handler (and the group); only a group left empty goes.
+$kept = @(foreach ($group in $pre) {
+  $foreign = @(@($group.hooks) | Where-Object { "$($_.command)" -cne $hookCmd })
+  if ($foreign.Count -eq @($group.hooks).Count) { $group }
+  elseif ($foreign.Count) { $group.hooks = [object[]]$foreign; $group }
 })
 Set-Prop $hooksObj 'PreToolUse' ([object[]]($kept + $entry))
 Set-Prop $settings 'hooks' $hooksObj
 
 # -Depth 100: the default of 2 silently truncates nested settings into strings.
-[IO.File]::WriteAllText($settingsPath, ($settings | ConvertTo-Json -Depth 100))
+# write -> re-parse -> atomic replace: a truncated write must never land.
+$tmp = "$settingsPath.rrun-tmp"
+[IO.File]::WriteAllText($tmp, ($settings | ConvertTo-Json -Depth 100))
+$null = (Get-Content -Raw $tmp) | ConvertFrom-Json
+Move-Item -Force $tmp $settingsPath
 if (-not $Quiet) { Write-Host "  hook installed -> $hookDir" }
