@@ -8,7 +8,8 @@ param(
   [string]$TargetHost = '',
   [string]$TargetShell = 'bash',
   # e.g. -TargetHops 'pi,localhost' — a real nested chain (needs each hop able
-  # to ssh to the next, with POSIX shell + base64 on the intermediates)
+  # to ssh to the next, with a POSIX login shell + base64 + bash on the
+  # intermediates; the hop layer runs `exec bash -c`)
   [string]$TargetHops = ''
 )
 $ErrorActionPreference = 'Continue'

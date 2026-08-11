@@ -24,6 +24,17 @@
 #     auto-switch to streaming the base64 over stdin; the remote payload then
 #     cannot read stdin. Streaming works at ANY hop count (each intermediate
 #     ssh forwards stdin to the next), so nested chains carry big payloads too.
+#     The limit counts COMPOSED COMMAND chars, not payload bytes, and measures
+#     the OUTERMOST command (the binding constraint — every layer carries a
+#     command and the outer one is biggest). So the payload size that actually
+#     trips streaming is well under the number and shrinks per hop (4/3 each;
+#     ps also pays ~2.67x for UTF-16LE+base64). Measured at the default 6000:
+#       -s bash  ~4.3KB / ~3.1KB / ~2.2KB   at 1 / 2 / 3 hops
+#       -s ps    ~1.5KB / ~1.0KB / ~0.7KB
+#     Since streaming costs the payload its stdin, that switch is worth being
+#     able to predict: `-n` shows which form was chosen (a streamed dry-run
+#     starts "printf %s <b64> | ssh"), and raising RRUN_STREAM_LIMIT (up to
+#     RRUN_MAX_CMD) keeps a payload embedded and stdin-capable.
 #   * KNOWN ISSUE: streamed sessions to a Windows sshd can nondeterministically
 #     wedge remotely before the payload runs (host-side sshd/DefaultShell race,
 #     independent of rrun version and payload — see README caveats). Wrap in a
@@ -96,6 +107,20 @@
 #                 numeric (arithmetic contexts evaluate contents), and an
 #                 explicitly empty -c is a valid no-op program (was rejected
 #                 by the core/bash shim, accepted by the ps shim).
+#   v2.3.8 2026-08-10 DOCS + COVERAGE, no behavior change (review round 9):
+#                 (a) v2.3.7's README weakened the intermediate-hop requirement
+#                 to "a POSIX shell" — the hop layer still runs `exec bash -c`,
+#                 so bash is required BY NAME on every intermediate; understating
+#                 a dependency sends debuggers down the wrong path. (b) Nested
+#                 streaming's threshold counts COMMAND chars (not payload bytes)
+#                 on the OUTERMOST layer, so the payload size that costs a
+#                 payload its stdin is far smaller than RRUN_STREAM_LIMIT reads
+#                 and shrinks per hop — measured per shell/hop-count in the
+#                 caveats above, with -n named as the way to see which
+#                 transport was chosen.
+#                 (c) RRUN_MAX_CMD had no regression test (one loop validates
+#                 both knobs and picks the name to report — each needs its own
+#                 case), and negative values were untested.
 #   v2.2.1 2026-08-10 streaming ps bootstrap now travels as -EncodedCommand:
 #                 the bare "-Command iex(...)" form was re-parsed when the remote
 #                 sshd DefaultShell was PowerShell (outer shell evaluated the

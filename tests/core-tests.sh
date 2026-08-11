@@ -218,6 +218,19 @@ RRUN_STREAM_LIMIT=abc "$RRUN" -s bash examplehost -c x 2>"$work/err"; rc=$?
 [[ $rc == 2 ]] && grep -q 'RRUN_STREAM_LIMIT' "$work/err"
 check 'non-numeric RRUN_STREAM_LIMIT rejected with a diagnostic' $?
 
+# ...and the SAME guard covers RRUN_MAX_CMD. Both are validated by one loop that
+# picks the name to report, so each knob needs its own case: a loop that always
+# blamed RRUN_STREAM_LIMIT would send the caller after the wrong variable.
+RRUN_MAX_CMD=xyz "$RRUN" -s bash examplehost -c x 2>"$work/err"; rc=$?
+[[ $rc == 2 ]] && grep -q 'RRUN_MAX_CMD' "$work/err" && ! grep -q 'RRUN_STREAM_LIMIT' "$work/err"
+check 'non-numeric RRUN_MAX_CMD rejected, naming the right variable' $?
+
+# Negative values are non-numeric too: `-5` in an arithmetic comparison silently
+# works (and would force streaming forever), so the regex must reject the sign.
+RRUN_STREAM_LIMIT=-5 "$RRUN" -s bash examplehost -c x 2>"$work/err"; rc=$?
+[[ $rc == 2 ]] && grep -q 'RRUN_STREAM_LIMIT' "$work/err"
+check 'negative RRUN_STREAM_LIMIT rejected' $?
+
 # REGRESSION: an explicitly empty -c is a valid no-op program (the core and
 # bash shim used ${2:?} and rejected it; the ps shim accepted it). Only a
 # MISSING argument is an error — rrun adds no semantics of its own.

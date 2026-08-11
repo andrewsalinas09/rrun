@@ -83,6 +83,13 @@ if ($hostSpec -eq 'local') {
       # .NET string and re-encoded as UTF-8, transforming UTF-16/legacy/binary
       # stdin. PowerShell object-pipeline input is deliberately NOT what `-`
       # means — that would compromise byte semantics.
+      # Consequence, documented in the README: `Get-Content x | rrun host -`
+      # does NOT feed those objects here; the raw handle is read instead (and
+      # can block on a console). DON'T try to detect that with
+      # $MyInvocation.ExpectingInput — measured True for BOTH the object
+      # pipeline AND `cmd /c "... -" < file`, which is the supported raw-stdin
+      # form the CI regression uses, so a guard on it would reject the very
+      # invocation this path exists to serve.
       $ms = New-Object IO.MemoryStream
       [Console]::OpenStandardInput().CopyTo($ms)
       $payloadBytes = $ms.ToArray()
