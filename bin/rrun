@@ -49,6 +49,15 @@
 #                 payloads (Windows 8191-char command-line ceiling), %q paste-safe
 #                 dry-run, host-token validation, -s validation, missing-optarg
 #                 errors, cat --, size guard on multi-hop ps targets.
+#   v2.2.1 2026-08-10 streaming ps bootstrap now travels as -EncodedCommand:
+#                 the bare "-Command iex(...)" form was re-parsed when the remote
+#                 sshd DefaultShell was PowerShell (outer shell evaluated the
+#                 subexpression itself and re-quoted the payload — silently
+#                 corrupting $-bearing statements; verified against a pwsh-shell
+#                 host). Encoded form is inert under cmd, PowerShell, and POSIX
+#                 shells alike. Also: host tokens may not start with '-' (would
+#                 parse as an ssh option), dry-run %q-quotes every ssh argv
+#                 element (a metachar ProxyJump arg printed unquoted before).
 #   v2.3 2026-08-10 payload text is NEVER modified: the ProgressPreference
 #                 prefix broke payloads starting with param()/using (must be a
 #                 script's first statements). Payloads now ride as untouched
@@ -121,15 +130,6 @@
 #                 (c) RRUN_MAX_CMD had no regression test (one loop validates
 #                 both knobs and picks the name to report — each needs its own
 #                 case), and negative values were untested.
-#   v2.2.1 2026-08-10 streaming ps bootstrap now travels as -EncodedCommand:
-#                 the bare "-Command iex(...)" form was re-parsed when the remote
-#                 sshd DefaultShell was PowerShell (outer shell evaluated the
-#                 subexpression itself and re-quoted the payload — silently
-#                 corrupting $-bearing statements; verified against a pwsh-shell
-#                 host). Encoded form is inert under cmd, PowerShell, and POSIX
-#                 shells alike. Also: host tokens may not start with '-' (would
-#                 parse as an ssh option), dry-run %q-quotes every ssh argv
-#                 element (a metachar ProxyJump arg printed unquoted before).
 set -euo pipefail
 
 shell="" jump="" dry=0
