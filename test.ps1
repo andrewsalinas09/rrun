@@ -135,14 +135,25 @@ if (Test-Path $ps51) {
 Write-Host '[installed: Git Bash shim]'
 $gitBash = "$env:ProgramFiles\Git\bin\bash.exe"
 if (Test-Path $gitBash) {
-  $out = (& $gitBash -c '"$HOME/.local/bin/rrun" -n examplehost -c hostname' 2>&1) -join ' '
+  # Run a script FILE, never `bash -c '<script containing quotes>'`. Windows
+  # PowerShell 5.1 STRIPS double quotes from native-command arguments and
+  # word-splits them, so the -c script arrived at bash shredded into separate
+  # argv elements (measured: six instead of one) and the local-mode check failed
+  # under 5.1 while passing under pwsh 7. The shim itself was never at fault --
+  # the identical command run natively from Git Bash works. This is the repo's
+  # own payload-as-data rule applied to the harness: the script is a file, the
+  # operands are plain arguments, and nothing needs quoting to survive.
+  $gbHelper = Join-Path $tmpDir 'gb-run.sh'
+  [IO.File]::WriteAllText($gbHelper, '"$HOME/.local/bin/rrun" "$@"' + "`n")
+  $gb = $gbHelper -replace '\\', '/'
+  $out = (& $gitBash $gb -n examplehost -c hostname 2>&1) -join ' '
   Check 'dry-run via bash shim' ($out -like 'ssh -o BatchMode=yes examplehost powershell*')
-  $out = (& $gitBash -c '"$HOME/.local/bin/rrun" -n local -c hostname' 2>&1) -join ' '
+  $out = (& $gitBash $gb -n local -c hostname 2>&1) -join ' '
   Check 'REGRESSION: bash shim -n local dry-runs' ($out -match 'EncodedCommand')
-  $out = & $gitBash -c '"$HOME/.local/bin/rrun" -s bash local -c "echo rrun-selftest-ok"' 2>&1 | Out-String
-  Check 'bash shim local mode' ($out -match 'rrun-selftest-ok')
+  $out = & $gitBash $gb -s bash local -c 'echo rrun-selftest-ok' 2>&1 | Out-String
+  Check 'bash shim local mode' ($out -match 'rrun-selftest-ok') $out.Trim()
   $u16Fwd = $u16File -replace '\\', '/'
-  $out = & $gitBash -c ('"$HOME/.local/bin/rrun" local "' + $u16Fwd + '"') 2>&1 | Out-String
+  $out = & $gitBash $gb local $u16Fwd 2>&1 | Out-String
   Check 'REGRESSION: UTF-16LE payload file decodes (bash shim local)' ($out -match 'u16len:4') $out.Trim()
 } else {
   Write-Host '  SKIP  Git Bash not found'
