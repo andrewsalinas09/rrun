@@ -5,8 +5,9 @@
 # that will execute it. For multi-hop chains, each intermediate ssh command is
 # itself re-armored, so quoting depth stays flat no matter how many hops.
 #
-# usage: rrun [-s ps|bash|sh] [-J jumphosts] [-n] <host[,host2,...]> <script | - | -c "cmds">
-#   -s ps|bash|sh  target shell on the FINAL host (default ps; *.sh/*.bash files -> bash)
+# usage: rrun [-s ps|bash|sh] [-J jumphosts] [-n] <host[,host2,...]|adb[:serial]> <script | - | -c "cmds">
+#   -s ps|bash|sh  target shell on the FINAL host (default ps; *.sh/*.bash files -> bash;
+#                  adb targets default to sh — Android ships no bash and no PowerShell)
 #   -J jumphosts   ssh ProxyJump — preferred for hops when local can auth to the final host
 #   -n             dry-run: print the composed invocation (shell-quoted, paste-safe)
 #   host,host2     nested-hop chain (use when intermediate hosts hold the keys);
@@ -14,6 +15,11 @@
 #                  (including the final one) need a POSIX login shell + base64
 #                  + sh; the first hop only needs ssh and a login shell that
 #                  respects single quotes (csh is fine THERE, not later).
+#   adb[:serial]   an Android device over adb instead of ssh. Legal ONLY as the
+#                  LAST hop: alone ("adb") the adb client runs locally; as the
+#                  tail of a chain ("jump,adb:SERIAL1234") it runs on the preceding
+#                  host, so the device may hang off a different machine. Bare
+#                  "adb" means adb's own default device (it errors on 0 or 2+).
 #
 # caveats:
 #   * STREAMED bash/sh payloads cannot read stdin (the channel carries the
@@ -146,6 +152,27 @@
 #                 one-liner, so it now runs `exec sh -c`: busybox/dash-only
 #                 hosts are legal anywhere in a chain, and requirements are
 #                 uniform — hosts 2..N need a POSIX login shell + base64 + sh.
+#   v2.5  2026-08-11 ADB TRANSPORT (`adb` / `adb:<serial>` as the final hop).
+#                 Class fix per the RSI rule: `adb shell` is a second boundary
+#                 where a hand-quoted payload gets eaten, found when a
+#                 `find ... \( -iname ... \)` sent from Git Bash arrived at the
+#                 device with its escapes stripped and silently matched nothing
+#                 (exit 0, empty output — the worst failure shape). adb is a
+#                 near-exact structural match for ssh: argv is joined and parsed
+#                 by the device's sh, stdin is forwarded, and the payload's exit
+#                 code passes through — so the POSIX branch is reused verbatim
+#                 and ONLY the delivery program changes. Android specifics are
+#                 baked in rather than left to callers: (a) default -s is sh (no
+#                 bash on stock Android) and -s ps is rejected with a real
+#                 message; (b) the device command is prefixed
+#                 TMPDIR=${TMPDIR:-/data/local/tmp} — mktemp is the FIRST thing
+#                 the POSIX wrapper runs, and a device that leaves TMPDIR unset
+#                 defaults it to /tmp, which does not exist on Android (mktemp
+#                 fails -> exit 125, payload never runs); (c) when adb is the
+#                 tail of an ssh chain the adb command is armored like any hop
+#                 layer (`s=$(echo b64 | base64 -d)`) instead of nested-quoted,
+#                 so the device command's own single quotes never meet the ssh
+#                 layer's.
 set -euo pipefail
 
 # GNU base64 takes -w0; BSD/macOS base64 has no -w AT ALL (a macOS sender
@@ -169,7 +196,7 @@ done
 shift $((OPTIND-1))
 
 if (( $# < 2 )); then
-  echo 'usage: rrun [-s ps|bash|sh] [-J jumps] [-n] <host[,host2,...]> <script | - | -c "cmds">' >&2
+  echo 'usage: rrun [-s ps|bash|sh] [-J jumps] [-n] <host[,host2,...]|adb[:serial]> <script | - | -c "cmds">' >&2
   exit 2
 fi
 
@@ -187,10 +214,27 @@ case "$src" in
   *)  payload_b64=$(b64enc < "$src") ;;
 esac
 
+# An Android device is reached with `adb [-s serial] shell <cmd>`, not ssh. Detect
+# it from the LAST hostspec component (adb can only ever be the final target —
+# nothing ssh's *out* of a device shell in this design) so shell defaulting below
+# can account for it before anything else is decided.
+adb_target=0 adb_serial=""
+case "${hostspec##*,}" in
+  adb)   adb_target=1 ;;
+  adb:*) adb_target=1; adb_serial=${hostspec##*,}; adb_serial=${adb_serial#adb:} ;;
+esac
+if (( adb_target )) && [[ -n $adb_serial && ! $adb_serial =~ ^[A-Za-z0-9._:-]+$ ]]; then
+  # The serial is the one adb argument rrun interpolates, so it must be inert.
+  echo "rrun: invalid adb serial '$adb_serial' (allowed: letters, digits, . _ : -)" >&2
+  exit 2
+fi
+
 if [[ -z $shell ]]; then
   case "$src" in
     *.sh|*.bash) shell=bash ;;
-    *)           shell=ps ;;
+    # Stock Android has no PowerShell and no bash — only /system/bin/sh. Defaulting
+    # an adb target to ps (the ssh default) would fail on every device.
+    *)           if (( adb_target )); then shell=sh; else shell=ps; fi ;;
   esac
 fi
 
@@ -198,6 +242,16 @@ case "$shell" in
   ps|bash|sh) ;;
   *) echo "rrun: -s must be ps, bash or sh (got '$shell')" >&2; exit 2 ;;
 esac
+
+if (( adb_target )) && [[ $shell == ps ]]; then
+  echo "rrun: -s ps is not valid for an adb target (Android has no PowerShell); use -s sh" >&2
+  exit 2
+fi
+if (( adb_target )) && [[ -n $jump ]]; then
+  # ProxyJump is an ssh concept; the adb client speaks USB/TCP to the device.
+  echo 'rrun: -J is meaningless for an adb target' >&2
+  exit 2
+fi
 
 # Structural validation BEFORE splitting: `read -a` silently discards a
 # trailing empty field (so "h1," passed as just h1), and an empty hostspec
@@ -218,6 +272,22 @@ for h in "${hops[@]}"; do
     exit 2
   fi
 done
+# An adb token anywhere but the end would mean "ssh onward FROM the device",
+# which this transport does not provide. Catch it here with a real message
+# instead of trying to ssh to a host literally named "adb".
+for ((i=0; i<${#hops[@]}-1; i++)); do
+  if [[ ${hops[i]} == adb || ${hops[i]} == adb:* ]]; then
+    echo "rrun: 'adb' is only valid as the LAST hop (got '$hostspec')" >&2
+    exit 2
+  fi
+done
+# The device is not an ssh destination, so it must not drive an ssh layer. What
+# remains in `hops` are the real ssh hosts; an empty array means the adb client
+# runs right here.
+if (( adb_target )); then
+  unset 'hops[${#hops[@]}-1]'
+  hops=("${hops[@]}")
+fi
 
 # The composed command can blow past a command-line limit — 8191 chars via
 # cmd.exe on stock Windows OpenSSH, 128 KiB per argv element on Linux (E2BIG,
@@ -278,8 +348,17 @@ if [[ $shell == ps ]]; then
   ps_stream_b64=$(printf %s "$ps_boot" | iconv -f UTF-8 -t UTF-16LE | b64enc)
 fi
 
-compose() {  # $1: 0 = payload embedded in the command, 1 = payload on stdin
-  local st=$1 c b i
+tmpfix=""
+if (( adb_target )); then tmpfix="TMPDIR=\${TMPDIR:-/data/local/tmp}; "; fi
+
+# build_inner is split out of compose() because the adb transport needs this
+# string BY ITSELF in the parent shell (it becomes a single argv element for the
+# local adb client). compose() runs inside a command substitution, so anything it
+# assigned to a global would be discarded with the subshell — a mistake that
+# costs nothing here and is silent everywhere else.
+build_inner() {  # $1: 0 = payload embedded in the command, 1 = payload on stdin
+                 # -> the command that runs ON the final target
+  local st=$1 c
   case "$shell" in
     ps)
       if (( st )); then c="powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $ps_stream_b64"
@@ -303,13 +382,39 @@ compose() {  # $1: 0 = payload embedded in the command, 1 = payload on stdin
       # clean the decoded file up on normal exit and on catchable HUP/INT/TERM
       # (SIGKILL and host crashes can't be trapped); the EXIT trap does not
       # alter the exit status, so the executor's code passes through.
+      # mktemp is the FIRST thing this wrapper runs, so its default directory is
+      # a hard dependency. Android leaves /tmp nonexistent; a device that also
+      # leaves TMPDIR unset would fail mktemp and exit 125 with the payload never
+      # run. Pinning the default here (not overriding a TMPDIR the device DID
+      # set) makes the wrapper's own precondition true on every device.
       if (( st )); then
-        c="sh -c 't=\$(mktemp) || exit 125; trap \"rm -f \\\"\$t\\\"\" 0; trap exit 1 2 15; base64 -d > \"\$t\" || { echo rrun: remote decode failed >&2; exit 125; }; $shell \"\$t\"'"
+        c="sh -c '${tmpfix}t=\$(mktemp) || exit 125; trap \"rm -f \\\"\$t\\\"\" 0; trap exit 1 2 15; base64 -d > \"\$t\" || { echo rrun: remote decode failed >&2; exit 125; }; $shell \"\$t\"'"
       else
-        c="sh -c 't=\$(mktemp) || exit 125; trap \"rm -f \\\"\$t\\\"\" 0; trap exit 1 2 15; echo $payload_b64 | base64 -d > \"\$t\" || { echo rrun: remote decode failed >&2; exit 125; }; $shell \"\$t\"'"
+        c="sh -c '${tmpfix}t=\$(mktemp) || exit 125; trap \"rm -f \\\"\$t\\\"\" 0; trap exit 1 2 15; echo $payload_b64 | base64 -d > \"\$t\" || { echo rrun: remote decode failed >&2; exit 125; }; $shell \"\$t\"'"
       fi
       ;;
   esac
+  printf %s "$c"
+}
+
+compose() {  # $1: 0 = payload embedded in the command, 1 = payload on stdin
+             # -> the OUTERMOST command (what rrun itself executes)
+  local st=$1 c b i
+  c=$(build_inner "$st")
+
+  # adb delivery. The device command becomes the argument of `adb shell`, which
+  # joins its argv and hands the result to /system/bin/sh — structurally the same
+  # contract as ssh, so nothing above needed to change. Two forms:
+  #   * no ssh hops left  -> the caller executes build_inner's output as ONE argv
+  #     element (no shell in between at all, so nothing can re-parse it).
+  #   * adb after a chain -> the adb invocation must ride INSIDE an ssh layer, so
+  #     it is armored exactly like a hop layer. Nesting the device command's own
+  #     single quotes inside the ssh layer's would be the very quote-stacking
+  #     this tool exists to prevent.
+  if (( adb_target )); then
+    b=$(printf %s "$c" | b64enc)
+    c="s=\$(echo $b | base64 -d) || { echo rrun: adb decode failed >&2; exit 125; }; exec adb${adb_serial:+ -s $adb_serial} shell \"\$s\""
+  fi
   # Wrap outward from the final hop: each intermediate host runs
   #   ssh <next> '<armored inner command>'
   # where the quoted part is pure base64 — no hop ever parses a metacharacter
@@ -352,11 +457,26 @@ if [[ -n $jump ]]; then
   sshopts+=(-J "$jump")
 fi
 
+# The delivery argv, built once and used by both the dry-run and the real run so
+# the two can never drift. An adb target with no ssh hops left is delivered by
+# the local adb client: the device command goes as ONE argv element, so no shell
+# stands between rrun and adb and there is nothing left to re-parse it.
+if (( adb_target )) && (( ${#hops[@]} == 0 )); then
+  deliver=(adb)
+  [[ -n $adb_serial ]] && deliver+=(-s "$adb_serial")
+  # Rebuilt in THIS shell (not captured from compose, which runs in a subshell)
+  # and for the transport actually chosen, so the embedded/streamed forms cannot
+  # disagree with the `stream` flag the caller acts on.
+  deliver+=(shell "$(build_inner "$stream")")
+else
+  deliver=(ssh "${sshopts[@]}" "${hops[0]}" "$cmd")
+fi
+
 if (( dry )); then
   # %q on EVERY argv element makes the printed command paste-safe: the composed
   # remote command ("| base64 -d | bash") would otherwise execute LOCALLY when
   # pasted, and a metacharacter-bearing -J argument would do the same.
-  dryout=$(printf '%q ' ssh "${sshopts[@]}" "${hops[0]}" "$cmd")
+  dryout=$(printf '%q ' "${deliver[@]}")
   if (( stream )); then
     printf 'printf %%s %s | %s\n' "$b64" "${dryout% }"
   else
@@ -366,13 +486,14 @@ if (( dry )); then
 fi
 
 if (( stream )); then
-  # Judge success by the ssh element ALONE. If a big streamed script exits
+  # Judge success by the TRANSPORT element alone. If a big streamed script exits
   # before reading all of stdin, the channel closes while printf still has
   # data: printf dies with SIGPIPE (141) and pipefail would report that even
-  # though the REMOTE COMMAND SUCCEEDED. PIPESTATUS[1] is ssh's own status
-  # (which is the remote exit code, or 255 for transport errors).
+  # though the REMOTE COMMAND SUCCEEDED. PIPESTATUS[1] is the transport's own
+  # status (the remote exit code, or 255 for ssh transport errors). adb forwards
+  # stdin to the device and passes the payload's exit code back the same way.
   set +e +o pipefail
-  printf %s "$b64" | ssh "${sshopts[@]}" "${hops[0]}" "$cmd"
+  printf %s "$b64" | "${deliver[@]}"
   exit "${PIPESTATUS[1]}"
 fi
-exec ssh "${sshopts[@]}" "${hops[0]}" "$cmd"
+exec "${deliver[@]}"

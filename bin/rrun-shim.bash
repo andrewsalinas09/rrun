@@ -15,7 +15,13 @@
 #                             Use powershell -File directly beyond that.
 #   * $HOME trampoline      : `sh -c '... "$@"' rrun args...` expands $HOME inside WSL
 #                             while payload args pass as untouched positional params.
-# usage mirrors WSL rrun:  rrun [-s ps|bash|sh] [-J jumps] [-n] <host[,hop2,...]|local> <script|-|-c "cmds">
+#   * host "adb[:serial]"   : run the payload on an Android device via adb shell.
+#                             Handled HERE, not forwarded to WSL — the adb client
+#                             and the USB device are both Windows-side (WSL2 has
+#                             no USB passthrough). Defaults to -s sh; streams the
+#                             payload over stdin past RRUN_STREAM_LIMIT so the
+#                             32767-char Windows command line can't truncate it.
+# usage mirrors WSL rrun:  rrun [-s ps|bash|sh] [-J jumps] [-n] <host[,hop2,...]|local|adb[:serial]> <script|-|-c "cmds">
 # history: v1 2026-08-10 created from transcript-error audit; v1.1 $HOME trampoline,
 #          CLIXML suppression; v1.2 review fixes — -n honored in local mode (was
 #          EXECUTING on dry-run), -c args no longer path-translated, -s validated,
@@ -31,7 +37,16 @@
 #          trailing newlines, changing backslash-newline-final payloads);
 #          v1.8 cleanup traps — decoded payload file never outlives an
 #          interrupted wrapper; v1.9 explicitly empty -c is a valid no-op
-#          program (only a MISSING argument is an error) — matches core+ps shim.
+#          program (only a MISSING argument is an error) — matches core+ps shim;
+#          v1.10 2026-08-11 adb transport (host "adb"/"adb:<serial>"). `adb
+#          shell` is a boundary that eats hand-quoted payloads exactly like the
+#          ones this shim already covers: a find(1) with escaped parens sent
+#          from Git Bash arrived at the device stripped, matched nothing, and
+#          exited 0 — a silent wrong answer. Handled locally rather than
+#          forwarded (adb + USB are Windows-side); TMPDIR pinned to
+#          /data/local/tmp (Android has no /tmp and mktemp is the wrapper's
+#          first statement); stdin-streaming above RRUN_STREAM_LIMIT so the
+#          32767-char Windows command line cannot truncate a big payload.
 set -euo pipefail
 
 xlate() {  # absolute Windows path -> /mnt/<d>/... for WSL
@@ -58,6 +73,63 @@ if (( $# < 2 )); then
   exit 2
 fi
 host=$1; shift
+
+# adb targets are handled HERE, never forwarded to WSL: the adb client and the
+# USB device both live on the Windows side, and WSL2 has no USB passthrough — a
+# forwarded `adb` would find no binary (or, worse, a second adb server that sees
+# no devices). Same reasoning as host "local".
+if [[ $host == adb || $host == adb:* ]]; then
+  if (( jump )); then echo 'rrun: -J is meaningless for an adb target' >&2; exit 2; fi
+  serial=""
+  [[ $host == adb:* ]] && serial=${host#adb:}
+  if [[ -n $serial && ! $serial =~ ^[A-Za-z0-9._:-]+$ ]]; then
+    echo "rrun: invalid adb serial '$serial' (allowed: letters, digits, . _ : -)" >&2
+    exit 2
+  fi
+  src=$1
+  case "$src" in
+    -c) pb64=$(printf %s "${2?rrun: -c needs a command string}" | base64 -w0) ;;
+    -)  pb64=$(base64 -w0) ;;
+    *)  pb64=$(base64 -w0 < "$src") ;;
+  esac
+  # Stock Android ships /system/bin/sh and neither bash nor PowerShell.
+  [[ -z $shell ]] && shell=sh
+  if [[ $shell == ps ]]; then
+    echo 'rrun: -s ps is not valid for an adb target (Android has no PowerShell); use -s sh' >&2
+    exit 2
+  fi
+  # TMPDIR pinned because mktemp is this wrapper's first statement and Android
+  # has no /tmp; trap body single-quoted (never \"-escaped) so no argument
+  # boundary can eat it — the ps-shim v1.12 lesson applies to any native argv.
+  pre="TMPDIR=\${TMPDIR:-/data/local/tmp}; t=\$(mktemp) || exit 125; trap 'rm -f \"\$t\"' 0; trap exit 1 2 15;"
+  post="|| { echo rrun: adb decode failed >&2; exit 125; }; $shell \"\$t\""
+  run="$pre echo $pb64 | base64 -d > \"\$t\" $post"
+  args=(); [[ -n $serial ]] && args=(-s "$serial")
+  # adb.exe is a native Windows process, so the whole command counts against the
+  # 32767-char command-line limit. Past the threshold the payload rides on stdin
+  # instead (adb forwards stdin to the device), which costs the payload its own
+  # stdin but keeps arbitrarily large scripts working.
+  stream=0
+  if (( ${#run} > ${RRUN_STREAM_LIMIT:-6000} )); then
+    stream=1
+    run="$pre base64 -d > \"\$t\" $post"
+  fi
+  if (( dry )); then
+    dryout=$(printf '%q ' adb "${args[@]}" shell "$run")
+    if (( stream )); then printf 'printf %%s %s | %s\n' "$pb64" "${dryout% }"
+    else printf '%s\n' "${dryout% }"
+    fi
+    exit 0
+  fi
+  # MSYS_NO_PATHCONV=1: Git Bash otherwise rewrites the device's /data/local/tmp
+  # and /sdcard paths into C:/Program Files/Git/... before adb ever sees them.
+  if (( stream )); then
+    set +e +o pipefail
+    printf %s "$pb64" | env MSYS_NO_PATHCONV=1 adb "${args[@]}" shell "$run"
+    exit "${PIPESTATUS[1]}"
+  fi
+  exec env MSYS_NO_PATHCONV=1 adb "${args[@]}" shell "$run"
+fi
 
 if [[ $host == local ]]; then
   if (( jump )); then echo 'rrun: -J is meaningless with host "local"' >&2; exit 2; fi

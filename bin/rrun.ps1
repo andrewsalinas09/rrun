@@ -10,7 +10,12 @@
 #                       Use powershell -File directly beyond that.
 #   * $HOME trampoline: sh -c '... "$@"' expands $HOME inside WSL; payload args pass
 #                       as untouched positional params (no hardcoded WSL username).
-# usage mirrors WSL rrun:  rrun [-s ps|bash|sh] [-J jumps] [-n] <host[,hop2,...]|local> <script|-|-c "cmds">
+#   * host "adb[:serial]": payload runs on an Android device via adb shell. Handled
+#                       here, not forwarded to WSL -- adb + USB are Windows-side
+#                       (WSL2 has no USB passthrough). Defaults to -s sh; streams
+#                       over stdin past RRUN_STREAM_LIMIT so the 32767-char
+#                       Windows command line cannot truncate a big payload.
+# usage mirrors WSL rrun:  rrun [-s ps|bash|sh] [-J jumps] [-n] <host[,hop2,...]|local|adb[:serial]> <script|-|-c "cmds">
 # history: v1 2026-08-10 created from transcript-error audit; v1.1 $HOME trampoline,
 #          CLIXML suppression; v1.2 review fixes -- -n honored in local mode (was
 #          EXECUTING on dry-run), -c args no longer path-translated, -s validated,
@@ -42,7 +47,14 @@
 #          native arguments with legacy rules that mangle them, so bash got a
 #          truncated `trap "rm -f \"` -> "trap: usage: trap [-lp] ..." and the
 #          entire -s bash local path failed. Trap body now uses single quotes;
-#          nothing with escaped quotes may cross as a native argument.
+#          nothing with escaped quotes may cross as a native argument;
+#          v1.13 2026-08-11 adb transport (host "adb"/"adb:<serial>"). `adb
+#          shell` is another boundary that eats hand-quoted payloads: a find(1)
+#          with escaped parens arrived at the device stripped, matched nothing
+#          and exited 0 -- a silent wrong answer, the class this tool exists to
+#          kill. TMPDIR pinned to /data/local/tmp (Android has no /tmp and
+#          mktemp is the wrapper's first statement); stdin-streaming above
+#          RRUN_STREAM_LIMIT.
 $ErrorActionPreference = 'Stop'
 
 function Fail([string]$msg) {
@@ -80,6 +92,63 @@ if ($rest.Count -lt 2) {
   Fail 'usage: rrun [-s ps|bash|sh] [-J jumps] [-n] <host[,hop2,...]|local> <script | - | -c "cmds">'
 }
 $hostSpec = $rest[0]; $rest = @($rest[1..($rest.Count - 1)])
+
+if ($hostSpec -eq 'adb' -or $hostSpec -like 'adb:*') {
+  # Handled HERE, never forwarded to WSL: the adb client and the USB device are
+  # both Windows-side and WSL2 has no USB passthrough, so a forwarded 'adb'
+  # would find no binary (or a second adb server that sees no devices).
+  if ($jump) { Fail 'rrun: -J is meaningless for an adb target' }
+  $serial = ''
+  if ($hostSpec -like 'adb:*') { $serial = $hostSpec.Substring(4) }
+  if ($serial -and $serial -notmatch '^[A-Za-z0-9._:-]+$') {
+    Fail "rrun: invalid adb serial '$serial' (allowed: letters, digits, . _ : -)"
+  }
+  $src = $rest[0]
+  $payloadBytes = $null
+  switch ($src) {
+    '-c' {
+      if ($rest.Count -lt 2) { Fail 'rrun: -c needs a command string' }
+      $payloadBytes = [Text.Encoding]::UTF8.GetBytes($rest[1])
+    }
+    '-' {
+      # raw process stdin, byte-for-byte (see the local branch's note)
+      $ms = New-Object IO.MemoryStream
+      [Console]::OpenStandardInput().CopyTo($ms)
+      $payloadBytes = $ms.ToArray()
+    }
+    default { $payloadBytes = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $src).Path) }
+  }
+  # Stock Android ships /system/bin/sh and neither bash nor PowerShell.
+  if (-not $shell) { $shell = 'sh' }
+  if ($shell -eq 'ps') {
+    Fail 'rrun: -s ps is not valid for an adb target (Android has no PowerShell); use -s sh'
+  }
+  $pb64 = [Convert]::ToBase64String($payloadBytes)
+  # TMPDIR is pinned because mktemp is this wrapper's FIRST statement and Android
+  # has no /tmp. The trap body uses single quotes, never \"-escaped quotes: 5.1
+  # re-quotes native arguments with legacy rules that mangle those (see v1.12).
+  $pre = 'TMPDIR=${TMPDIR:-/data/local/tmp}; t=$(mktemp) || exit 125; trap ''rm -f "$t"'' 0; trap exit 1 2 15;'
+  $post = '|| { echo rrun: adb decode failed >&2; exit 125; }; ' + $shell + ' "$t"'
+  $run = $pre + ' echo ' + $pb64 + ' | base64 -d > "$t" ' + $post
+  $limit = if ($env:RRUN_STREAM_LIMIT) { [int]$env:RRUN_STREAM_LIMIT } else { 6000 }
+  # adb.exe is a native Windows process, so the command counts against the
+  # 32767-char command-line limit. Past the threshold the payload rides on stdin
+  # (adb forwards it to the device); that costs the payload its own stdin but
+  # keeps arbitrarily large scripts working.
+  $stream = $run.Length -gt $limit
+  if ($stream) { $run = $pre + ' base64 -d > "$t" ' + $post }
+  $argv = @()
+  if ($serial) { $argv += @('-s', $serial) }
+  $argv += @('shell', $run)
+  if ($dry) {
+    if ($stream) { Write-Output "printf %s $pb64 | adb $($argv -join ' ')" }
+    else { Write-Output "adb $($argv -join ' ')" }
+    exit 0
+  }
+  $ErrorActionPreference = 'Continue'   # see v1.11: native stderr must not throw
+  if ($stream) { $pb64 | & adb.exe @argv } else { & adb.exe @argv }
+  exit $LASTEXITCODE
+}
 
 if ($hostSpec -eq 'local') {
   if ($jump) { Fail 'rrun: -J is meaningless with host "local"' }

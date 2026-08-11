@@ -32,6 +32,18 @@ corresponding bug actually shipped.
    rounds. Agents are explicitly told to learn the architecture from README,
    so a stale claim there reproduces the unsafe design in re-derivations.
    Historical changelog text is exempt (it describes what USED to happen).
+
+5. No real device serials in examples, docs or tests.
+   The adb transport (2.8.0) is demonstrated with `adb:<serial>`, and the
+   obvious way to write those examples is to paste the serial of whatever
+   device was plugged in while developing -- which is a permanent,
+   non-resettable hardware ID of someone's personal phone, published to a
+   public repo and preserved in git history forever. It is not a credential
+   (adb still needs the on-device RSA authorization), but it is the identifier
+   warranty/carrier/insurance records key on, and Android itself has gated
+   Build.getSerial() behind a privileged permission since Android 10 for the
+   same reason. A placeholder documents the feature exactly as well, so the
+   only allowed serials are the documented placeholders.
 """
 import glob
 import os
@@ -76,6 +88,40 @@ for f in sorted(glob.glob("bin/*") + glob.glob("hooks/*")):
     raw = open(f, "rb").read()
     hits = PAT.findall(raw)
     check(not hits, f, "hardcoded: %r" % (hits[:3],))
+
+print("[no real device serials -- adb examples use the documented placeholder]")
+# Match on SHAPE, not on an allowlist of prose: a real device serial is a long
+# alphanumeric run mixing letters and digits. (No example is spelled out here --
+# a file whose job is to keep serials out of the repo must not carry one.) That
+# leaves the tokens docs and tests legitimately use -- adb:<serial>, adb:SER,
+# the adb:bad;serial validation case -- unflagged without having to enumerate
+# them, while any pasted device is caught. The documented placeholder is
+# serial-shaped by construction, so it is the one thing that must be excused.
+PLACEHOLDERS = {b"SERIAL1234"}
+ADB_SERIAL = re.compile(rb"adb:([A-Za-z0-9]{8,})\b")
+for f in sorted(
+    set(
+        glob.glob("bin/*")
+        + glob.glob("hooks/*")
+        + glob.glob("tests/*.sh")
+        + glob.glob("tests/*.py")
+        + glob.glob("*.md")
+        + glob.glob("*.ps1")
+    )
+):
+    if os.path.isdir(f):
+        continue
+    raw = open(f, "rb").read()
+    bad = sorted(
+        {
+            m
+            for m in ADB_SERIAL.findall(raw)
+            if m not in PLACEHOLDERS
+            and any(c.isdigit() for c in m.decode())
+            and any(c.isalpha() for c in m.decode())
+        }
+    )
+    check(not bad, f, "real-looking device serial(s): %r" % (bad[:3],))
 
 print("[normative docs do not teach the abandoned transport]")
 STALE = re.compile(rb"base64 -d \| (ba|z)?sh\b|exec bash -c")

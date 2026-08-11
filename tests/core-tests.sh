@@ -264,9 +264,71 @@ b64=$(sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' <<<"${ARGV[-1]}")
 [[ $rc == 0 && -z $b64 ]]
 check "empty -c '' composes as a no-op program (only missing -c is an error)" $?
 
+echo '[adb transport]'
+# adb is a second delivery boundary with ssh's structure (argv joined and parsed
+# by the device's sh, stdin forwarded, exit code passed through). A stub records
+# argv/stdin the same way the ssh stub does.
+cat > "$work/bin/adb" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\0' "$@" > "$STUB_OUT.argv"
+cat > "$STUB_OUT.stdin"
+STUB
+chmod +x "$work/bin/adb"
+
+out=$("$RRUN" -n adb -c 'echo hi')
+[[ $out == 'adb shell '* && $out != *ssh* ]]
+check 'adb alone composes a local adb invocation (no ssh)' $?
+
+# REGRESSION (the bug that motivated the transport): a payload with shell
+# metacharacters -- the find(1) escaped-paren form that arrived at the device
+# stripped and silently matched nothing -- must survive byte-for-byte.
+adbpayload='find /sdcard -type f \( -iname "*.jpg" -o -iname "*.mp4" \) | wc -l'
+PATH="$stubpath" "$RRUN" adb -c "$adbpayload" < /dev/null
+argv
+b64=$(sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' <<<"${ARGV[-1]}")
+[[ ${ARGV[0]} == shell && $(printf %s "$b64" | base64 -d) == "$adbpayload" ]]
+check 'adb payload survives armoring byte-for-byte (escaped parens intact)' $?
+
+# Android has no /tmp and mktemp is the wrapper's FIRST statement, so an unset
+# TMPDIR means exit 125 with the payload never run.
+[[ ${ARGV[-1]} == "sh -c 'TMPDIR=\${TMPDIR:-/data/local/tmp}; t=\$(mktemp)"* ]]
+check 'adb device command pins TMPDIR ahead of mktemp' $?
+
+# No -s given: an adb target must default to sh, not the ssh default of ps.
+[[ ${ARGV[-1]} == *'; sh "$t"'* ]]
+check 'adb target defaults to -s sh (not ps)' $?
+
+out=$("$RRUN" -n adb:SERIAL1234 -c 'echo hi')
+[[ $out == 'adb -s SERIAL1234 shell '* ]]
+check 'adb:<serial> passes -s <serial> to the adb client' $?
+
+# adb as the tail of a chain: ssh delivers to the hop, which runs the adb client.
+# The adb layer must be ARMORED, not nested-quoted -- the device command contains
+# its own single quotes and would otherwise collide with the ssh layer's.
+out=$("$RRUN" -n jumphost,adb:SER -c 'echo hi')
+[[ $out == 'ssh -o BatchMode=yes jumphost '* && $out == *'base64\ -d'* && $out == *'exec\ adb\ -s\ SER\ shell'* ]]
+check 'adb after a chain rides armored inside the ssh layer' $?
+
+# Streaming must survive the swap of delivery program: the bootstrap reads the
+# payload from stdin and adb forwards stdin to the device.
+big=$(head -c 20000 /dev/zero | tr '\0' 'x')
+PATH="$stubpath" "$RRUN" adb -c "echo $big" < /dev/null
+argv
+[[ ${ARGV[-1]} == *'base64 -d > "$t"'* && ${ARGV[-1]} != *'echo '*'| base64 -d'* ]] &&
+  [[ $(base64 -d < "$STUB_OUT.stdin") == "echo $big" ]]
+check 'large adb payload streams over stdin byte-for-byte' $?
+
 echo '[validation]'
 "$RRUN" -s bash 'h1;rm -rf /' -c x 2>/dev/null; [[ $? == 2 ]]
 check 'metacharacter host token rejected' $?
+"$RRUN" -s ps adb -c x 2>/dev/null; [[ $? == 2 ]]
+check 'adb target with -s ps rejected (Android has no PowerShell)' $?
+"$RRUN" 'adb,realhost' -c x 2>/dev/null; [[ $? == 2 ]]
+check 'adb in a non-final hop position rejected' $?
+"$RRUN" 'adb:bad;serial' -c x 2>/dev/null; [[ $? == 2 ]]
+check 'metacharacter adb serial rejected' $?
+"$RRUN" -J jump adb -c x 2>/dev/null; [[ $? == 2 ]]
+check 'adb target with -J rejected' $?
 # REGRESSION: structural hostspec validation must run BEFORE splitting — an
 # empty host crashed under set -u (unbound ${hops[0]}) instead of exiting 2,
 # and "h1," was silently accepted (read -a drops trailing empty fields).
