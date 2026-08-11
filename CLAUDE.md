@@ -18,6 +18,10 @@ On Windows (with WSL + Git Bash):
 
 On a pure-Linux machine: copy `bin/rrun` to `~/.local/bin/`, `chmod +x` — done.
 
+To remove everything: `& <repo>\uninstall.ps1` — reverses all six install steps
+(only rrun's own settings.json entry and env values; user-owned config
+survives), self-checks, and exits non-zero if anything rrun-shaped remains.
+
 ## 2. Rules of engagement once installed (offer these to the user for their global CLAUDE.md — their call)
 
 - **Payload-as-data rule**: never pass non-trivial payloads through nested interpreter layers as escaped strings. Write tool → file → run the file, or use `rrun`. More than one level of quoting = switch patterns.

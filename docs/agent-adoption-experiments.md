@@ -100,6 +100,53 @@ the boundary — the best case for hand-quoting. (c) n=4 pairs, one machine.
   was absent from its transcript JSONL) — transcript-based adoption metrics
   undercount.
 
+## Experiment 3: uninstall before/after (4 agents, real tool absence)
+
+Experiment 2's control arm was contaminated: the constraint forbade rrun, but
+the tool (and its shims, wrappers, and hook) still existed. `uninstall.ps1`
+(added for this) removes all of it — so the "before" arm ran on a machine
+where rrun was genuinely uninstalled (verified 6/6 by the uninstaller's
+self-check), and the "after" arm ran minutes later on the same machine after
+`install.ps1` (verified by the full suite). Identical prompts, no
+tool-related constraint at all — just "don't install anything".
+
+| Task | BEFORE (uninstalled) | AFTER (installed) |
+|---|---|---|
+| 3-hop chain report | OK on 2nd try — 11 calls, 32.3k tok, 144s, **one silent-corruption incident** | OK first try — 4 calls, 34.1k tok, 51s |
+| hostile literal through 3 hops | OK — 8 calls, 34.5k, 99s | OK — 7 calls, 58.2k, 109s (extra self-verification) |
+
+Two findings, one flattering and one damning — both deserve the emphasis:
+
+**The capability side (genuinely excellent).** Uninstalling did not stop the
+agents. Both "before" agents noticed rrun was absent and **ran it from the
+repo checkout instead** (`wsl -e bash /mnt/c/.../rrun/bin/rrun ...`) — a
+legitimate reading of "work with what the machine has", and the same
+resourcefulness the Experiment-2 stock agent showed by reinventing base64
+armoring. Consequence for methodology: *an uninstall is not a control for
+agents working inside the tool's own repo* — a clean tool-absent arm needs a
+neutral working directory, out of reach of this session's project context.
+
+**The failure side (they failed hard, and silently).** Absence of the
+INSTALLED entry points still exacted the exact price the tool exists to
+prevent. Without the shims, reaching the repo copy required hand-quoting one
+outer layer (`wsl -e bash -lc "..."`), and that single layer ate a
+backslash: `printf %s\n` degraded to a literal `n` and the agent's FIRST
+answer reported the remote PATH as `.../snap/binn` — a **silent corruption,
+shipped as a confident result**, caught only because the agent got
+suspicious and re-ran with `echo`. It cost 11 tool calls and 144 s against
+the installed twin's 4 calls and 51 s. The controlled kicker: the installed
+"after" agent used the *identical* `printf "%s\n" "$PATH"` idiom through
+rrun and it came back byte-perfect, first try — same task, same idiom, same
+model; the only variable was whether the boundary was hand-quoted. That is
+the first real corruption incident in 19 agent runs across these
+experiments, and it appeared the moment the installed tool was absent.
+
+Score on the four outcomes that matter (see the long-context design below):
+before-arm produced 1 silently-wrong-then-corrected and 0 give-ups; after-arm
+produced 0 incidents. Tokens were a wash (before 66.7k / after 92.3k — the
+after hostile agent spent freely on double verification); wall time favored
+installed 160s vs 243s.
+
 ## Designed, NOT yet run: the long-context experiment
 
 Both experiments above test the regime where agents are fresh and the
