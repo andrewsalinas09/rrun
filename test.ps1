@@ -1,4 +1,4 @@
-# test.ps1 — rrun smoke tests over the INSTALLED artifacts. No remote host
+# test.ps1 -- rrun smoke tests over the INSTALLED artifacts. No remote host
 # required: dry-runs verify composition through every entry point, host "local"
 # verifies real execution. Pass -TargetHost (and optionally -TargetShell) to add
 # real ssh round-trips, including the large-payload streaming path.
@@ -7,7 +7,7 @@
 param(
   [string]$TargetHost = '',
   [string]$TargetShell = 'bash',
-  # e.g. -TargetHops 'pi,localhost' — a real nested chain (needs each hop able
+  # e.g. -TargetHops 'pi,localhost' -- a real nested chain (needs each hop able
   # to ssh to the next, with a POSIX login shell + base64 + bash on the
   # intermediates; the hop layer runs `exec bash -c`)
   [string]$TargetHops = ''
@@ -27,16 +27,16 @@ function ToWslPath([string]$p) {
 }
 
 # Streamed (large-payload) sessions to a Windows sshd can wedge remotely BEFORE
-# the payload runs — a nondeterministic host-side race, independent of payload
+# the payload runs -- a nondeterministic host-side race, independent of payload
 # content and rrun version (see README known issues). A wedged check must be a
 # LOUD failure, never a silently hung suite: WSL `timeout` maps a wedge to exit
 # 124, we sweep the stuck remote process, and retry.
 function Invoke-RrunStreamTimed([string]$RemoteHost, [string]$File, [int]$TimeoutSec = 60) {
   # host/path ride as positional args ($1..$3), never interpolated into the
-  # bash source — the same payload-as-data rule the tool itself enforces.
+  # bash source -- the same payload-as-data rule the tool itself enforces.
   # PS-side 2>&1 is REQUIRED in addition to the bash-side one: remote error text
   # arrives as a "#< CLIXML" stream, which PowerShell deserializes and re-routes
-  # to its error stream — without this merge it vanishes from the capture.
+  # to its error stream -- without this merge it vanishes from the capture.
   $out = wsl.exe -e bash -c 'timeout "$1" "$HOME/.local/bin/rrun" "$2" "$3" 2>&1' rrun-timed $TimeoutSec $RemoteHost (ToWslPath $File) 2>&1 | Out-String
   @{ Out = $out; Exit = $LASTEXITCODE }
 }
@@ -48,7 +48,7 @@ function Invoke-RrunStreamRetry([string]$RemoteHost, [string]$File, [string]$Shi
   for ($try = 1; $try -le 3; $try++) {
     $r = Invoke-RrunStreamTimed $RemoteHost $File
     if ($r.Exit -ne 124) { return $r }
-    Write-Host "  WARN  streamed session wedged remotely (known Windows-sshd race; see README) — sweeping, retry $try/3"
+    Write-Host "  WARN  streamed session wedged remotely (known Windows-sshd race; see README) -- sweeping, retry $try/3"
     & $ShimPath $RemoteHost -c $script:sweepCmd 2>$null | Out-Null
   }
   return $r
@@ -59,6 +59,12 @@ wsl.exe -e bash -n (ToWslPath (Join-Path $repo 'bin\rrun')) 2>&1 | Out-Null
 Check 'core syntax (bash -n)' ($LASTEXITCODE -eq 0)
 $shimTxt = Get-Content -Raw (Join-Path $repo 'bin\rrun-shim.bash')
 Check 'no hardcoded usernames in shims' (-not (($shimTxt + (Get-Content -Raw (Join-Path $repo 'bin\rrun.ps1'))) -match '/home/[a-z]+[a-z0-9]*/'))
+# Windows PowerShell 5.1 reads BOM-less .ps1 as ANSI, so a UTF-8 em dash becomes
+# a stray quote and the file stops parsing. This shipped once; never again.
+$nonAscii = @(Get-ChildItem -Path $repo -Filter *.ps1 -Recurse -File | Where-Object {
+  [IO.File]::ReadAllBytes($_.FullName) | Where-Object { $_ -gt 127 } | Select-Object -First 1
+} | ForEach-Object { $_.Name })
+Check 'all .ps1 sources are pure ASCII (5.1 parses BOM-less .ps1 as ANSI)' ($nonAscii.Count -eq 0) ($nonAscii -join ', ')
 
 Write-Host '[installed: WSL core]'
 $out = (wsl.exe -e sh -c '"$HOME/.local/bin/rrun" -n examplehost -c hostname' 2>&1) -join ' '
@@ -71,7 +77,7 @@ $shim = Join-Path $env:USERPROFILE '.local\bin\rrun.ps1'
 $out = (& $shim -n examplehost -c hostname 2>$null) -join ' '
 Check 'dry-run via ps shim' ($out -like 'ssh -o BatchMode=yes examplehost powershell*')
 # the notice is written via [Console]::Error.WriteLine, which in-process 2>&1
-# cannot intercept — run the shim as a child powershell so stderr is a real
+# cannot intercept -- run the shim as a child powershell so stderr is a real
 # redirectable handle
 $all = (& powershell.exe -NoProfile -File $shim -n examplehost -c hostname 2>&1) -join ' '
 Check 'remote dry-run warns on stderr that output is bash-quoted (stdout clean)' ($all -match 'bash-quoted' -and $out -notmatch 'bash-quoted')
@@ -98,7 +104,7 @@ Check 'REGRESSION: local ps failure text visible on stderr' ($err -match 'not re
 & $shim local -c 'exit 3' 2>$null
 Check 'local ps preserves explicit exit code (3)' ($LASTEXITCODE -eq 3) "exit=$LASTEXITCODE"
 # REGRESSION: UTF-16LE .ps1 files (Windows PowerShell's Out-File/> default) must
-# decode as source text, not UTF-8 garbage — the wrapper detects BOMs. The é is
+# decode as source text, not UTF-8 garbage -- the wrapper detects BOMs. The e is
 # built with [char] so this test file itself stays pure ASCII.
 $u16File = Join-Path $tmpDir 'u16-payload.ps1'
 [IO.File]::WriteAllText($u16File, ('$s = ' + "'caf$([char]0xE9)'" + '; Write-Output ("u16len:" + $s.Length)'), [Text.Encoding]::Unicode)
@@ -131,7 +137,7 @@ if (Test-Path $gitBash) {
 
 Write-Host '[gateway shells (local emulation of sshd DefaultShell)]'
 # The streaming bootstrap must survive whatever shell the remote sshd hands it
-# to: cmd.exe (stock), powershell.exe 5.1, or pwsh 7 (custom DefaultShell) — a
+# to: cmd.exe (stock), powershell.exe 5.1, or pwsh 7 (custom DefaultShell) -- a
 # bare "-Command iex(...)" bootstrap was silently corrupted by a pwsh gateway.
 # Extract the REAL composed command from a dry-run, then pipe a $-bearing probe
 # payload through each local shell invoked exactly as sshd would.
@@ -171,6 +177,8 @@ Check 'dependency: a working Python 3 is on PATH (else the hook is inert)' ($nul
 if ($py) {
   & $py (Join-Path $repo 'tests\hook-tests.py')
   Check 'tests/hook-tests.py all pass' ($LASTEXITCODE -eq 0)
+  & $py (Join-Path $repo 'tests\source-hygiene.py') | Out-Null
+  Check 'tests/source-hygiene.py all pass (ASCII .ps1, LF, no hardcoded paths)' ($LASTEXITCODE -eq 0)
 }
 & (Join-Path $repo 'tests\hook-install-tests.ps1') | Out-Null
 Check 'tests/hook-install-tests.ps1 all pass (settings.json merge is safe)' ($LASTEXITCODE -eq 0)
@@ -180,7 +188,7 @@ if ($TargetHost) {
   $out = & $shim -s $TargetShell $TargetHost -c 'echo rrun-remote-ok' 2>&1 | Out-String
   Check "real ssh round-trip ($TargetShell)" ($out -match 'rrun-remote-ok')
   if ($TargetShell -eq 'ps') {
-    # small payload — non-streamed, exercises the remote BOM-aware decode
+    # small payload -- non-streamed, exercises the remote BOM-aware decode
     $out = & $shim $TargetHost $u16File 2>&1 | Out-String
     Check 'REGRESSION: UTF-16LE payload decodes on remote Windows host' ($out -match 'u16len:4') $out.Trim()
   }
@@ -194,7 +202,7 @@ if ($TargetHost) {
   }
   if ($TargetShell -eq 'ps') {
     # REGRESSION: large ps payload over the streaming bootstrap, against a REAL
-    # Windows sshd — the shell behind sshd (cmd or PowerShell DefaultShell) must
+    # Windows sshd -- the shell behind sshd (cmd or PowerShell DefaultShell) must
     # not re-parse the bootstrap or expand $-bearing payload statements. A bare
     # "-Command iex(...)" bootstrap corrupted these on pwsh-DefaultShell hosts.
     $lines = @('param([string]$marker = ''rrun-big-ps-ok'')', 'Write-Output "got:[$marker]"') +
@@ -206,7 +214,7 @@ if ($TargetHost) {
     Check 'ps streaming payload not re-parsed by remote shell' ($r.Out -notmatch 'not recognized|CommandNotFoundException')
     Check 'REGRESSION: streamed ps success exits zero (real host)' ($r.Exit -eq 0) "exit=$($r.Exit)"
     # a failing streamed payload must also carry its non-zero status back.
-    # exit 124 is the local timeout wrapper (a wedge), NOT the payload's status —
+    # exit 124 is the local timeout wrapper (a wedge), NOT the payload's status --
     # it must never satisfy the non-zero assertion.
     $failLines = @('no-such-command-xyz') + (1..400 | ForEach-Object { "# padding line $_ to push the payload well past the streaming threshold" })
     $failFile = Join-Path $tmpDir 'big-fail.ps1'
@@ -219,7 +227,7 @@ if ($TargetHost) {
 if ($TargetHops) {
   Write-Host "[nested hops: $TargetHops]"
   # Payload reports the byte count + md5 of the file it executed from, so a
-  # short or corrupted stream is caught — not merely a missing marker — and
+  # short or corrupted stream is caught -- not merely a missing marker -- and
   # exits 7 so status propagation through every layer is checked too.
   $lines = @('echo START') +
     (1..900 | ForEach-Object { "# padding line $_ to push the payload past the streaming threshold" }) +

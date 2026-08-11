@@ -1,4 +1,4 @@
-# shim-local-tests.ps1 — Windows CI tests for the PowerShell shim's "local" ps
+# shim-local-tests.ps1 -- Windows CI tests for the PowerShell shim's "local" ps
 # mode, run against the REPO SOURCE (bin/rrun.ps1) with real powershell.exe
 # execution. No WSL or ssh required, so this runs on a stock windows-latest
 # runner and gates merges on actual Windows PowerShell semantics (the Ubuntu
@@ -22,7 +22,7 @@ $out = & $shim local -c "using namespace System.Text`n[StringBuilder]::new().App
 Check 'REGRESSION: using-namespace payload runs' ($out -match 'ci-using-ok') $out.Trim()
 
 # REGRESSION: UTF-16LE .ps1 files (Windows PowerShell's Out-File/> default) must
-# decode as source text, not UTF-8 garbage. The é rides via [char] so this test
+# decode as source text, not UTF-8 garbage. The e rides via [char] so this test
 # file itself stays ASCII.
 $u16 = Join-Path $env:TEMP "rrun-ci-u16-$PID.ps1"
 [IO.File]::WriteAllText($u16, ('$s = ' + "'caf$([char]0xE9)'" + '; Write-Output ("u16len:" + $s.Length)'), [Text.Encoding]::Unicode)
@@ -32,7 +32,7 @@ Remove-Item $u16 -ErrorAction SilentlyContinue
 
 # REGRESSION: bash/sh FILE operands must ride as raw bytes. ReadAllText
 # BOM-decoded them and re-encoded as UTF-8, so a UTF-16LE (or any non-UTF-8)
-# shell file reached WSL transformed — text preservation, not bytes. No WSL
+# shell file reached WSL transformed -- text preservation, not bytes. No WSL
 # needed: pull the base64 out of the dry-run and compare to the file bytes.
 $rawFile = Join-Path $env:TEMP "rrun-ci-raw-$PID.sh"
 $rawBytes = [byte[]](0xFF, 0xFE, 0x68, 0x69, 0x0A, 0x00, 0xE9, 0x0D, 0x0A, 0x0A, 0x0A)
@@ -41,7 +41,7 @@ $dry = & $shim -n -s bash local $rawFile 2>&1 | Out-String
 $m = [regex]::Match($dry, 'echo ([A-Za-z0-9+/=]+) \| base64')
 Check 'REGRESSION: bash file operand rides as raw bytes (b64 == file bytes)' ($m.Success -and ($m.Groups[1].Value -eq [Convert]::ToBase64String($rawBytes))) $dry.Trim()
 
-# ...and stdin (-) must be raw bytes too — it was the last text-typed ingestion
+# ...and stdin (-) must be raw bytes too -- it was the last text-typed ingestion
 # path (Console.In.ReadToEnd re-encoded UTF-16/binary stdin as UTF-8). cmd.exe's
 # `<` hands the child the raw file handle; a PowerShell pipe would re-encode.
 # -Command (not -File): powershell.exe -File tries to bind a bare `-` as a
@@ -56,7 +56,7 @@ Remove-Item $rawFile -ErrorAction SilentlyContinue
 $out = & $shim -n local -c 'Write-Output SHOULD-NOT-RUN' 2>&1 | Out-String
 Check 'REGRESSION: -n local dry-runs, never executes' ($out -notmatch 'SHOULD-NOT-RUN\s*$' -and $out -match 'EncodedCommand')
 
-# Failures must be LOUD (stderr text) AND non-zero exit — a transport that
+# Failures must be LOUD (stderr text) AND non-zero exit -- a transport that
 # swallows either is worse than useless for debugging. Exit codes must match a
 # bare `powershell -Command`: any failure -> non-zero, explicit `exit N` -> N.
 $err = & $shim local -c 'no-such-command-xyz' 2>&1 | Out-String

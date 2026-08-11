@@ -1,4 +1,4 @@
-# rrun (Windows/PowerShell shim) — forwards to WSL ~/.local/bin/rrun so payloads cross
+# rrun (Windows/PowerShell shim) -- forwards to WSL ~/.local/bin/rrun so payloads cross
 # shell boundaries as data, never as escaped strings. Installed by install.ps1 into
 # %USERPROFILE%\.local\bin (PowerShell resolves `rrun` -> rrun.ps1 via PATH).
 #   * wsl.exe -e      : direct exec, WSL default shell never re-parses argv ($ survives)
@@ -12,21 +12,21 @@
 #                       as untouched positional params (no hardcoded WSL username).
 # usage mirrors WSL rrun:  rrun [-s ps|bash|sh] [-J jumps] [-n] <host[,hop2,...]|local> <script|-|-c "cmds">
 # history: v1 2026-08-10 created from transcript-error audit; v1.1 $HOME trampoline,
-#          CLIXML suppression; v1.2 review fixes — -n honored in local mode (was
+#          CLIXML suppression; v1.2 review fixes -- -n honored in local mode (was
 #          EXECUTING on dry-run), -c args no longer path-translated, -s validated,
 #          -J rejected for host local; v1.3 "local -c" with no command now exits 2
 #          (out-of-range $rest[1] was silently $null -> empty successful run);
 #          v1.4 local ps payloads never textually modified (prefix broke
-#          param()/using — scriptblock wrapper instead); v1.5 wrapper appends
+#          param()/using -- scriptblock wrapper instead); v1.5 wrapper appends
 #          `if (-not $?) { exit 1 }` so failing local ps payloads exit non-zero
 #          (the & operator otherwise swallowed the failure -> false success);
 #          v1.6 remote dry-run prints a stderr notice that the output is
 #          bash-quoted (not PowerShell paste-safe); ~9KB size doc fix;
 #          v1.7 status-honest local bash/sh decode (broken base64 -> loud
-#          125, not silent success); v1.8 file-backed decode — execution
+#          125, not silent success); v1.8 file-backed decode -- execution
 #          byte-for-byte ($(...) stripped trailing newlines, changing
 #          backslash-newline-final payloads); v1.9 file operands read as RAW
-#          BYTES (ReadAllText BOM-decoded + UTF-8 re-encoded bash/sh files —
+#          BYTES (ReadAllText BOM-decoded + UTF-8 re-encoded bash/sh files --
 #          text preservation, not bytes) + cleanup traps on the temp file;
 #          v1.10 stdin (-) is raw process stdin bytes too (last text-typed
 #          ingestion path; Console.In re-encoded UTF-16/binary stdin).
@@ -82,11 +82,11 @@ if ($hostSpec -eq 'local') {
       # pipes stdin straight into base64). Console.In.ReadToEnd() decoded to a
       # .NET string and re-encoded as UTF-8, transforming UTF-16/legacy/binary
       # stdin. PowerShell object-pipeline input is deliberately NOT what `-`
-      # means — that would compromise byte semantics.
+      # means -- that would compromise byte semantics.
       # Consequence, documented in the README: `Get-Content x | rrun host -`
       # does NOT feed those objects here; the raw handle is read instead (and
       # can block on a console). DON'T try to detect that with
-      # $MyInvocation.ExpectingInput — measured True for BOTH the object
+      # $MyInvocation.ExpectingInput -- measured True for BOTH the object
       # pipeline AND `cmd /c "... -" < file`, which is the supported raw-stdin
       # form the CI regression uses, so a guard on it would reject the very
       # invocation this path exists to serve.
@@ -96,7 +96,7 @@ if ($hostSpec -eq 'local') {
     }
     default {
       # file operands ride as RAW BYTES. ReadAllText would BOM-decode and later
-      # re-encode as UTF-8 — text preservation, not byte preservation: a
+      # re-encode as UTF-8 -- text preservation, not byte preservation: a
       # UTF-16LE shell file reached WSL deterministically transformed. Only the
       # ps path needs source TEXT (decoded BOM-aware below); bash/sh get the
       # original bytes, exactly like the core and the Git Bash shim.
@@ -138,12 +138,12 @@ if ($hostSpec -eq 'local') {
 }
 
 # remote: translate ONLY the script-source operand (a real local file) to a /mnt
-# path. Arguments following -c (and "-") are opaque payload data — never touched.
+# path. Arguments following -c (and "-") are opaque payload data -- never touched.
 if ($rest[0] -ne '-c' -and $rest[0] -ne '-' -and (Test-Path -LiteralPath $rest[0] -PathType Leaf)) {
   $rest[0] = ToWsl $rest[0]
 }
 if ($dry) {
-  # the core renders dry-runs with bash %q quoting — paste-safe for bash/WSL,
+  # the core renders dry-runs with bash %q quoting -- paste-safe for bash/WSL,
   # NOT for PowerShell (backslash escapes mean nothing here, so a metachar arg
   # could re-parse). Warn on stderr; stdout stays machine-parseable.
   [Console]::Error.WriteLine('rrun: dry-run below is bash-quoted (run it from bash/WSL; not PowerShell paste-safe)')

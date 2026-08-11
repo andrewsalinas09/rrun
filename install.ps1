@@ -1,11 +1,11 @@
-# install.ps1 — deploys rrun + shell-boundary class fixes on Windows + WSL.
+# install.ps1 -- deploys rrun + shell-boundary class fixes on Windows + WSL.
 # Idempotent AND self-updating: rerunning refreshes every installed artifact,
 # including the ~/.rrun/bash_env file and the sourcing block in ~/.bashrc.
 # Requires: Windows 10/11, WSL with a default Linux distro, Git Bash (for the bash shim).
 # Pure-Linux machines: skip this; just copy bin/rrun to ~/.local/bin and chmod +x.
 param(
   # Skip installing the Claude Code boundary-advisory hook (see hooks/). The
-  # rest of rrun is unaffected — the hook is a habit guard, not a dependency.
+  # rest of rrun is unaffected -- the hook is a habit guard, not a dependency.
   [switch]$SkipClaudeHook
 )
 $ErrorActionPreference = 'Stop'
@@ -13,7 +13,7 @@ $repo = $PSScriptRoot
 
 function Find-Python3 {
   # Returns the name of a WORKING python3, or $null. Name lookup alone is not
-  # enough: on Windows `python3` is commonly the Microsoft Store stub — present
+  # enough: on Windows `python3` is commonly the Microsoft Store stub -- present
   # on PATH, exits 49, prints "Python was not found". So each candidate must
   # actually run and report major version 3.
   foreach ($c in 'python3', 'python', 'py') {
@@ -33,7 +33,7 @@ function ToWslPath([string]$p) {
 Write-Host '[1/7] WSL core -> ~/.local/bin/rrun'
 $srcWsl = ToWslPath (Join-Path $repo 'bin\rrun')
 # the repo path rides as $1 (positional data), never interpolated into shell
-# source — a path containing $ ( ) etc. must not be parsed by the WSL shell
+# source -- a path containing $ ( ) etc. must not be parsed by the WSL shell
 $sh = 'mkdir -p "$HOME/.local/bin" && tr -d ''\r'' < "$1" > "$HOME/.local/bin/rrun" && chmod +x "$HOME/.local/bin/rrun" && bash -n "$HOME/.local/bin/rrun"'
 wsl.exe -e sh -c $sh sh $srcWsl
 if ($LASTEXITCODE -ne 0) { throw 'WSL core install failed (is a WSL distro installed and running?)' }
@@ -84,7 +84,7 @@ if (-not (Test-Path $bp)) {
   [IO.File]::WriteAllText($bp, "[ -f ~/.bashrc ] && . ~/.bashrc`n")
   Write-Host '  created ~/.bash_profile -> sources ~/.bashrc'
 } else {
-  # marker-managed block here too — a content heuristic ("mentions .bashrc")
+  # marker-managed block here too -- a content heuristic ("mentions .bashrc")
   # was fooled by comments like "# we do not source .bashrc here". Sourcing
   # bash_env twice (via .bashrc AND here) is harmless: it only defines
   # functions and exports.
@@ -99,7 +99,7 @@ if ((-not $curBashEnv) -or ($curBashEnv -eq $oldDefault)) {
   [Environment]::SetEnvironmentVariable('BASH_ENV', $wantEnv, 'User')
   Write-Host "  BASH_ENV=$wantEnv  (loads wrappers into non-interactive bash, e.g. Claude's Bash tool)"
 } elseif ($curBashEnv -ne $wantEnv) {
-  Write-Warning "BASH_ENV already set to '$curBashEnv' — left untouched; source $wantEnv from it manually."
+  Write-Warning "BASH_ENV already set to '$curBashEnv' -- left untouched; source $wantEnv from it manually."
 }
 if (-not [Environment]::GetEnvironmentVariable('PYTHONIOENCODING', 'User')) {
   [Environment]::SetEnvironmentVariable('PYTHONIOENCODING', 'utf-8', 'User')
@@ -128,7 +128,7 @@ if ($SkipClaudeHook) {
   } else {
     Write-Warning @'
 Python 3 was NOT found, so the boundary hook is installed but INERT.
-It fails open by design (it will never block your commands) — but it will also
+It fails open by design (it will never block your commands) -- but it will also
 never warn you. To activate it, install Python 3 and re-run install.ps1:
   winget install Python.Python.3.13     (or https://python.org/downloads)
 Ask Claude to run that for you if you would rather not. Prefer no hook at all?
@@ -137,7 +137,7 @@ Re-run with:  .\install.ps1 -SkipClaudeHook
   }
 }
 
-Write-Host '[7/7] Verify — full smoke suite'
+Write-Host '[7/7] Verify -- full smoke suite'
 & (Join-Path $repo 'test.ps1')
 if ($LASTEXITCODE -ne 0) { throw "verification failed: $LASTEXITCODE test(s) did not pass" }
 

@@ -1,4 +1,4 @@
-# hook-install-tests.ps1 — regression suite for hooks/install-hook.ps1.
+# hook-install-tests.ps1 -- regression suite for hooks/install-hook.ps1.
 #
 # This is the one part of rrun's install that edits a file the USER owns and may
 # have hand-tuned. "It merged cleanly" therefore has to be a test, not a promise.

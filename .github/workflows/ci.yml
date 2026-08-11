@@ -12,6 +12,8 @@ jobs:
         run: bash tests/core-tests.sh
       - name: Boundary-hook tests (detector + launcher)
         run: python3 tests/hook-tests.py
+      - name: Source hygiene (ASCII .ps1, LF endings, no hardcoded paths)
+        run: python3 tests/source-hygiene.py
   windows-shim:
     runs-on: windows-latest
     steps:
@@ -23,6 +25,20 @@ jobs:
       - name: Hook installer tests (settings.json merge)
         shell: pwsh
         run: ./tests/hook-install-tests.ps1
+      # Windows PowerShell 5.1 is the default powershell.exe everywhere and reads
+      # BOM-less .ps1 as ANSI -- every shipped .ps1 must parse under IT, not just
+      # under pwsh 7. This is the exact failure that broke a remote install.
+      - name: Parse every .ps1 under Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $bad = 0
+          Get-ChildItem -Path . -Filter *.ps1 -Recurse -File | ForEach-Object {
+            $e = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$e)
+            if ($e) { Write-Host "FAIL $($_.FullName): $($e.Count) parse error(s)"; $bad++ }
+            else { Write-Host "ok   $($_.Name)" }
+          }
+          if ($bad) { exit 1 }
       # Windows too: the launcher must survive Git Bash + the `python3` Store
       # stub, which is exactly where naive interpreter lookup breaks.
       - name: Boundary-hook tests (detector + launcher)
