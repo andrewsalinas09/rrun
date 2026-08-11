@@ -1,0 +1,20 @@
+# PowerShell-on-Linux node. Two matrix roles:
+#   * `-s ps` FINAL TARGET: the composed command runs `powershell` by name, so
+#     a symlink provides it (a real Linux pwsh host would need the same)
+#   * pwsh GATEWAY: LOGIN_SHELL=/usr/bin/pwsh emulates a pwsh sshd DefaultShell
+#     -- the shell that re-parsed the bare `-Command iex(...)` bootstrap and
+#     silently corrupted $-bearing payloads before v2.2.1
+FROM ubuntu:24.04
+ARG PWSH_URL=https://github.com/PowerShell/PowerShell/releases/download/v7.4.6/powershell-7.4.6-linux-x64.tar.gz
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      openssh-server openssh-client ca-certificates curl libicu74 \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /run/sshd /opt/pwsh \
+    && ssh-keygen -A \
+    && curl -fsSL "$PWSH_URL" | tar -xz -C /opt/pwsh \
+    && chmod +x /opt/pwsh/pwsh \
+    && ln -s /opt/pwsh/pwsh /usr/bin/pwsh \
+    && ln -s /opt/pwsh/pwsh /usr/bin/powershell
+COPY entrypoint.sh /entrypoint.sh
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]

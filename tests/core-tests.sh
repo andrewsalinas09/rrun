@@ -139,6 +139,30 @@ b64=$(sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' <<<"$layer")
 [[ $(printf %s "$b64" | base64 -d) == 'echo deep' ]]
 check 'multi-hop unwraps layer-by-layer to original payload' $?
 
+# REGRESSION: the hop layer must run `exec sh -c`, never `exec bash -c` — the
+# decoded text is always rrun's own POSIX one-liner, and requiring bash made
+# busybox/dash-only hosts illegal at every chain position after the first
+# (matrix-confirmed: the layer executes on hosts 2..N, INCLUDING the final).
+[[ ${ARGV[-1]} == *'exec sh -c'* && ${ARGV[-1]} != *'exec bash -c'* ]]
+check 'hop layer execs sh, not bash (busybox/dash hosts legal)' $?
+
+# REGRESSION: senders without GNU base64 (macOS/BSD: no -w flag AT ALL) must
+# still compose. Fake a BSD base64 that dies on -w and wraps encode output,
+# exactly like the macos-sim matrix cell that found this.
+mkdir -p "$work/bsdbin"
+cat > "$work/bsdbin/base64" <<'BSD'
+#!/usr/bin/env bash
+for a in "$@"; do case "$a" in -w*) echo "base64: invalid option -- w" >&2; exit 64 ;; esac; done
+if [[ ${1:-} == -d ]]; then shift; exec /usr/bin/base64 -d "$@"; fi
+exec /usr/bin/base64 "$@"   # GNU default wraps at 76 cols, like BSD output has line length limits
+BSD
+chmod +x "$work/bsdbin/base64"
+PATH="$work/bsdbin:$stubpath" "$RRUN" -s bash examplehost -c 'echo bsd-sender-ok' < /dev/null
+argv
+b64=$(sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' <<<"${ARGV[-1]}")
+[[ -n $b64 && $(printf %s "$b64" | base64 -d) == 'echo bsd-sender-ok' ]]
+check 'BSD/macOS sender (base64 without -w) composes a working command' $?
+
 echo '[streaming]'
 RRUN_STREAM_LIMIT=10 PATH="$stubpath" "$RRUN" -s bash examplehost -c 'echo big-payload' < /dev/null
 argv

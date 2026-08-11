@@ -67,16 +67,29 @@ appeared when the code met a different environment:
 
 The pattern in four of five: **the name on `PATH` was not the program we assumed.**
 
-Planned direction (user's, and the evidence supports it): many container images
-with *randomly interleaved* tool versions, rather than one blessed combination.
-Prioritize the axes above — they have confirmed bug yield.
+**The matrix now exists: `tests/matrix/` (since 2.5.0).** Small committed
+Dockerfiles + a driver; containers ssh to each other by name with per-link
+keys, covering GNU/busybox/BSD-ish userlands, OpenSSH/dropbear,
+csh/fish/dash/pwsh login shells, pwsh gateways, sabotaged deps, 1–3-hop
+chains, ProxyJump, and md5-verified streamed payloads. Runs in CI. Its FIRST
+run confirmed the macOS `base64 -w0` suspicion (fixed via `b64enc()`), proved
+the hop-dependency docs were aimed at the wrong hosts (hop layer executes on
+hosts 2..N, not the first hop — `exec sh -c` now, bash required nowhere), and
+found that pwsh sshd gateways flatten non-zero exit codes to 1. Add a cell
+per new environment suspicion — cells are one `scenario` line.
 
-Untested suspicion worth a matrix slot: `base64 -w0` is GNU-specific, so a
-**macOS sender** likely fails (`-w0` is unsupported there). Not verified.
+Still NOT covered (candidates for new lanes):
+- **Windows containers** (PowerShell 5.1 + real Windows sshd + cmd.exe 8191
+  limits + the streamed-wedge race — reproducible in
+  `mcr.microsoft.com/windows/servercore` once the host has the Containers
+  feature; GitHub `windows-2022` runners can run them in CI)
+- **real macOS** (macos-sim is a proxy: bash 3.2 + BSD base64; a real Mac
+  sender via a `macos-latest` CI job would close it)
+- sshd *version* axis (old OpenSSH), and randomly interleaved tool versions
+  rather than the current curated combinations
 
-Until that exists, treat "works on this machine" as **unverified**, and prefer
-running a real install on a second, differently-configured host before claiming
-a release is portable.
+"Works on this machine" is still unverified for those axes; prefer a real
+install on a differently-configured host before claiming portability there.
 
 ## Repo conventions
 

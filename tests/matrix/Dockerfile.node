@@ -1,0 +1,13 @@
+# Baseline matrix node: modern GNU userland + OpenSSH (ubuntu). csh/fish are
+# preinstalled so LOGIN_SHELL cells can pick them at runtime; dash ships with
+# ubuntu. Used as sender, hop, and target.
+FROM ubuntu:24.04
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      openssh-server openssh-client csh fish \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /run/sshd \
+    && ssh-keygen -A
+COPY entrypoint.sh /entrypoint.sh
+# strip CR defensively: a CRLF checkout would break the shebang at runtime
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]

@@ -7,5 +7,7 @@ tests/*.sh          text eol=lf
 hooks/*.sh          text eol=lf
 hooks/*.py          text eol=lf
 tests/*.py          text eol=lf
+# matrix files enter Linux containers verbatim -- CRLF breaks shebangs/Dockerfiles
+tests/matrix/**     text eol=lf
 *.ps1               text eol=crlf
 *.md                text

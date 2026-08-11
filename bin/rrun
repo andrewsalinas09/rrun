@@ -10,7 +10,10 @@
 #   -J jumphosts   ssh ProxyJump — preferred for hops when local can auth to the final host
 #   -n             dry-run: print the composed invocation (shell-quoted, paste-safe)
 #   host,host2     nested-hop chain (use when intermediate hosts hold the keys);
-#                  intermediate hops need base64 + bash; payload runs on the LAST host.
+#                  payload runs on the LAST host. Chain hosts after the FIRST
+#                  (including the final one) need a POSIX login shell + base64
+#                  + sh; the first hop only needs ssh and a login shell that
+#                  respects single quotes (csh is fine THERE, not later).
 #
 # caveats:
 #   * STREAMED bash/sh payloads cannot read stdin (the channel carries the
@@ -130,7 +133,28 @@
 #                 (c) RRUN_MAX_CMD had no regression test (one loop validates
 #                 both knobs and picks the name to report — each needs its own
 #                 case), and negative values were untested.
+#   v2.4  2026-08-10 PORTABILITY, found by the docker environment matrix
+#                 (tests/matrix): (a) macOS/BSD senders died at `base64 -w0`
+#                 ("invalid option -- w" — GNU-only flag, confirmed by the
+#                 macos-sim cell); encoding now goes through b64enc(), which
+#                 probes once and falls back to `base64 | tr -d '\n'`.
+#                 (b) the hop layer ran `exec bash -c`, requiring bash BY NAME
+#                 on every chain host after the first — including the FINAL
+#                 host of a chain (the layer executes on hosts 2..N; the first
+#                 hop only parses `ssh next '<quoted>'`, which even csh
+#                 handles). The decoded text is always rrun's own POSIX
+#                 one-liner, so it now runs `exec sh -c`: busybox/dash-only
+#                 hosts are legal anywhere in a chain, and requirements are
+#                 uniform — hosts 2..N need a POSIX login shell + base64 + sh.
 set -euo pipefail
+
+# GNU base64 takes -w0; BSD/macOS base64 has no -w AT ALL (a macOS sender
+# died with "invalid option -- w"). Probe by execution, choose once.
+if printf x | base64 -w0 >/dev/null 2>&1; then
+  b64enc() { base64 -w0; }
+else
+  b64enc() { base64 | tr -d '\n'; }
+fi
 
 shell="" jump="" dry=0
 while getopts ":s:J:n" opt; do
@@ -158,9 +182,9 @@ case "$src" in
   # ${2?...} not ${2:?...}: an EXPLICITLY EMPTY command is a valid (no-op)
   # program and must run like one — only a MISSING argument is an error. The
   # shims accept empty too; rrun adds no semantics of its own.
-  -c) payload_b64=$(printf %s "${2?rrun: -c needs a command string}" | base64 -w0) ;;
-  -)  payload_b64=$(base64 -w0) ;;
-  *)  payload_b64=$(base64 -w0 < "$src") ;;
+  -c) payload_b64=$(printf %s "${2?rrun: -c needs a command string}" | b64enc) ;;
+  -)  payload_b64=$(b64enc) ;;
+  *)  payload_b64=$(b64enc < "$src") ;;
 esac
 
 if [[ -z $shell ]]; then
@@ -248,10 +272,10 @@ if [[ $shell == ps ]]; then
   # (Out-File / > default), which a blind UTF-8 decode turns into garbage.
   # BOM-less sources are decoded as UTF-8 (the documented contract).
   ps_wrapper="\$ProgressPreference='SilentlyContinue'; \$__rb=[Convert]::FromBase64String('$payload_b64'); & ([scriptblock]::Create((New-Object IO.StreamReader((New-Object IO.MemoryStream(,\$__rb)),\$true)).ReadToEnd() + [char]10 + 'if (-not \$?) { exit 1 }'))"
-  ps_embed_b64=$(printf %s "$ps_wrapper" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
+  ps_embed_b64=$(printf %s "$ps_wrapper" | iconv -f UTF-8 -t UTF-16LE | b64enc)
   # same wrapper, reading the payload base64 from stdin instead
   ps_boot="\$ProgressPreference='SilentlyContinue'; \$__rb=[Convert]::FromBase64String([Console]::In.ReadToEnd()); & ([scriptblock]::Create((New-Object IO.StreamReader((New-Object IO.MemoryStream(,\$__rb)),\$true)).ReadToEnd() + [char]10 + 'if (-not \$?) { exit 1 }'))"
-  ps_stream_b64=$(printf %s "$ps_boot" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)
+  ps_stream_b64=$(printf %s "$ps_boot" | iconv -f UTF-8 -t UTF-16LE | b64enc)
 fi
 
 compose() {  # $1: 0 = payload embedded in the command, 1 = payload on stdin
@@ -296,9 +320,13 @@ compose() {  # $1: 0 = payload embedded in the command, 1 = payload on stdin
   # never user payload bytes. `exec` keeps stdin attached to the next ssh, so
   # a streamed payload flows through the whole chain. Hop login shells must be
   # POSIX-capable.
+  # `exec sh -c`, NOT `exec bash -c`: the decoded text is rrun's own generated
+  # one-liner (another hop layer or the final sh -c/powershell wrapper), always
+  # POSIX — requiring bash here made busybox/dash-only hosts illegal anywhere
+  # after the first chain position, for no benefit (matrix-confirmed).
   for ((i=${#hops[@]}-2; i>=0; i--)); do
-    b=$(printf %s "$c" | base64 -w0)
-    c="ssh -o BatchMode=yes ${hops[i+1]} 's=\$(echo $b | base64 -d) || { echo rrun: hop decode failed >&2; exit 125; }; exec bash -c \"\$s\"'"
+    b=$(printf %s "$c" | b64enc)
+    c="ssh -o BatchMode=yes ${hops[i+1]} 's=\$(echo $b | base64 -d) || { echo rrun: hop decode failed >&2; exit 125; }; exec sh -c \"\$s\"'"
   done
   printf %s "$c"
 }

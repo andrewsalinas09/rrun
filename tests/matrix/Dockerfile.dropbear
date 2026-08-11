@@ -1,0 +1,9 @@
+# Dropbear-sshd node: the non-OpenSSH server axis (routers, embedded boxes).
+# openssh is still installed for the CLIENT side (hop roles run `ssh` by name;
+# ssh-keyscan is used for provisioning) -- only the server is dropbear.
+FROM alpine:3.20
+ARG PKGS=""
+RUN apk add --no-cache dropbear openssh-client-default $PKGS && mkdir -p /etc/dropbear
+COPY entrypoint.sh /entrypoint.sh
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]

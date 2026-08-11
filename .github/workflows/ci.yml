@@ -14,6 +14,14 @@ jobs:
         run: python3 tests/hook-tests.py
       - name: Source hygiene (ASCII .ps1, LF endings, no hardcoded paths)
         run: python3 tests/source-hygiene.py
+  env-matrix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # containers ssh to each other on a docker network: distro/shell/sshd
+      # combinations, multi-hop chains, sabotaged deps -- see tests/matrix/
+      - name: Environment matrix (docker + container-to-container ssh)
+        run: bash tests/matrix/matrix.sh
   windows-shim:
     runs-on: windows-latest
     steps:

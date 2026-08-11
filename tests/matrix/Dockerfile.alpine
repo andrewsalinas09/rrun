@@ -1,0 +1,9 @@
+# Busybox-userland node: ash login shell, busybox base64/mktemp/md5sum, musl
+# libc. PKGS adds per-cell extras (bash for hop/sender roles, musl-utils for
+# the iconv axis). This is the "embedded/minimal Linux" corner of the matrix.
+FROM alpine:3.20
+ARG PKGS=""
+RUN apk add --no-cache openssh $PKGS && ssh-keygen -A
+COPY entrypoint.sh /entrypoint.sh
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]

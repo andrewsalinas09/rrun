@@ -1,0 +1,8 @@
+# macOS SENDER proxy. Not a real Mac -- but it reproduces the two sender-side
+# properties a Mac would bring: bash 3.2 (what macOS still ships) and a BSD
+# base64 with no -w flag (the documented untested suspicion in CLAUDE.md).
+# Sender role only: no sshd.
+FROM bash:3.2
+RUN apk add --no-cache openssh-client
+COPY bsd-base64.sh /usr/local/bin/base64
+RUN sed -i 's/\r$//' /usr/local/bin/base64 && chmod +x /usr/local/bin/base64
