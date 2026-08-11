@@ -80,13 +80,63 @@ to `ok` when fixed.
 4. Probes: alpine/musl senders fully work — busybox `base64 -w0` and
    musl-utils `iconv` → UTF-16LE are both fine.
 
+## The Windows lane (`matrix-win.ps1`, since 2.6.0)
+
+The axes Linux containers cannot host: **real Windows PowerShell 5.1, real
+Windows OpenSSH sshd** (Win32-OpenSSH in servercore), pwsh 7, and the
+cmd / powershell(5.1) / pwsh `DefaultShell` gateway axis — selected at
+runtime via `DEFAULT_SHELL` (see `ep-win.ps1`). The sender runs `bin/rrun`
+under **Git Bash (MSYS)** — itself an axis, and the only configuration where
+the core runs with no WSL anywhere.
+
+Requirements: docker Windows engine — locally that means the Containers +
+Microsoft-Hyper-V features and `DockerCli.exe -SwitchDaemon` (the Linux lane
+is unaffected: WSL integration always talks to the Linux engine); GitHub's
+`windows-2022` runner has it natively and runs this lane as the `win-matrix`
+CI job with process isolation.
+
+First-run findings:
+- **The streamed-session wedge race reproduces on demand** — on every
+  gateway, cmd.exe included (one run: 3/3 wedges on cmd, 2/3 on 5.1, 1/3 on
+  pwsh), correcting the belief that it was pwsh-`DefaultShell`-specific.
+  Streamed cells run with timeout + 5 retries and LOUD per-run wedge counts:
+  the flake is the measurement.
+- **5.1 gateways flatten non-zero exit codes to 1, exactly like pwsh** —
+  PowerShell-family behavior, both editions (README caveat updated).
+- Green otherwise: exact exit codes through cmd, UTF-16LE decode on real
+  5.1, streamed payloads un-reparsed.
+
+Windows-container gotchas already banked as comments at their point of use:
+case-sensitive GitHub release-tag URLs; `net user` prompting on >14-char
+passwords (no stdin in builds) and failing opaquely in build-time
+`powershell -Command` (user creation lives in the entrypoint, under `-File`);
+WinNAT rejecting host-IP port bindings; `docker cp` unsupported against
+running Hyper-V containers (mount volumes at start); Git Bash ssh resolving
+home from the Windows profile and IGNORING `$HOME` (per-run config rides an
+`ssh -F` wrapper on `PATH`); `administrators_authorized_keys` needs
+SYSTEM/Administrators *ownership*, not just the right ACLs, and sshd only
+says so at `LogLevel DEBUG3`.
+
+### Windows lane: current status (2026-08-11)
+
+Working and findings-verified, with one caveat: under a wedge BURST the lane
+gets slow (each wedge costs a 75 s timeout + a sweep), and one full-green run
+of the final file-redirect version is still outstanding -- an earlier version
+hung forever because attempt output was captured via `$(...)` command
+substitution, which blocks until every pipe writer exits, and an MSYS
+`timeout` kill can orphan the streamed pipeline's ssh against a wedged
+session. Attempt output now goes to files (control returns when the timeout
+fires), the sweep clears the remote side between tries, and container boots
+are staggered with one retry (simultaneous Hyper-V starts can kill a
+container at boot). The CI job is `continue-on-error` with a hard
+`timeout-minutes` until a characterized green run promotes it.
+
 ## Known gaps (planned lanes)
 
-- **Windows containers**: PowerShell 5.1, real Windows sshd, cmd.exe's 8191
-  limit, the streamed-wedge race — `mcr.microsoft.com/windows/servercore`
-  has all of it; needs the Windows Containers feature on the host (GitHub
-  `windows-2022` runners can run them in CI).
 - **Real macOS**: macos-sim is a faithful-in-two-ways proxy, not a Mac; a
   `macos-latest` CI sender job would close the gap.
 - sshd *version* axis (old OpenSSH releases), and randomized tool-version
   interleaving instead of curated combinations.
+- Cross-OS chains (Linux hop -> Windows final target): the two docker
+  engines have separate networks, so this needs host-published ports as the
+  bridge.

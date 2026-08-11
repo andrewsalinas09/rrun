@@ -78,15 +78,23 @@ hosts 2..N, not the first hop — `exec sh -c` now, bash required nowhere), and
 found that pwsh sshd gateways flatten non-zero exit codes to 1. Add a cell
 per new environment suspicion — cells are one `scenario` line.
 
+**The Windows-container lane exists too: `tests/matrix/matrix-win.ps1` (since
+2.6.0).** Servercore + real PowerShell 5.1 + real Windows sshd + pwsh 7, with
+cmd/powershell/pwsh `DefaultShell` selected per cell; sender = the core under
+Git Bash (MSYS), no WSL. It reproduced the streamed-wedge race on demand (on
+cmd gateways too, not just pwsh), and proved 5.1 gateways flatten exit codes
+like pwsh. Needs the docker Windows engine locally (Containers + Hyper-V,
+`DockerCli -SwitchDaemon`); runs in CI on `windows-2022`. Its construction
+gotchas (WinNAT, docker cp vs Hyper-V, Git Bash ssh ignoring $HOME,
+administrators_authorized_keys OWNERSHIP) are comments at their point of use.
+
 Still NOT covered (candidates for new lanes):
-- **Windows containers** (PowerShell 5.1 + real Windows sshd + cmd.exe 8191
-  limits + the streamed-wedge race — reproducible in
-  `mcr.microsoft.com/windows/servercore` once the host has the Containers
-  feature; GitHub `windows-2022` runners can run them in CI)
 - **real macOS** (macos-sim is a proxy: bash 3.2 + BSD base64; a real Mac
   sender via a `macos-latest` CI job would close it)
 - sshd *version* axis (old OpenSSH), and randomly interleaved tool versions
   rather than the current curated combinations
+- cross-OS chains (Linux hop -> Windows final target) -- the two docker
+  engines have separate networks, so this needs host-published ports
 
 "Works on this machine" is still unverified for those axes; prefer a real
 install on a differently-configured host before claiming portability there.

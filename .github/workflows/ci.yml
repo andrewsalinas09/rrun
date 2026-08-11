@@ -22,6 +22,23 @@ jobs:
       # combinations, multi-hop chains, sabotaged deps -- see tests/matrix/
       - name: Environment matrix (docker + container-to-container ssh)
         run: bash tests/matrix/matrix.sh
+  # the axes Linux containers cannot host: real PowerShell 5.1, real Windows
+  # sshd, cmd.exe limits, the streamed-wedge race (reproduced here). Runner
+  # ltsc2022 matches the servercore base, so containers use process isolation.
+  # ADVISORY for now (continue-on-error): the lane works -- it reproduced the
+  # streamed-wedge race and measured both gateway findings -- but wedge BURSTS
+  # make wall-time and flake rate unpredictable, and the burst-hang fix
+  # (file-redirected attempt output) has not yet had a full green local run.
+  # timeout-minutes is a hard backstop; promote to required once characterized.
+  win-matrix:
+    runs-on: windows-2022
+    continue-on-error: true
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Windows-container matrix lane
+        shell: pwsh
+        run: ./tests/matrix/matrix-win.ps1
   windows-shim:
     runs-on: windows-latest
     steps:

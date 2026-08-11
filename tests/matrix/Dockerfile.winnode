@@ -1,0 +1,33 @@
+# escape=`
+# Windows matrix node: the axes Linux containers cannot host -- REAL Windows
+# PowerShell 5.1, REAL Windows OpenSSH sshd (Win32-OpenSSH), cmd.exe command
+# lines, and the cmd/powershell/pwsh DefaultShell gateway variants (selected
+# at runtime via DEFAULT_SHELL -- see ep-win.ps1).
+# Host requirements: docker Windows engine (Containers + Hyper-V features).
+# The base image is multi-GB on first pull; the Dockerfile stays tiny.
+FROM mcr.microsoft.com/windows/servercore:ltsc2022
+SHELL ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+# NOTE the tag casing: ...p1-Beta, not ...p1-beta -- the lowercase form 404s
+ARG OPENSSH_URL=https://github.com/PowerShell/Win32-OpenSSH/releases/download/v9.5.0.0p1-Beta/OpenSSH-Win64.zip
+ARG PWSH_URL=https://github.com/PowerShell/PowerShell/releases/download/v7.4.6/PowerShell-7.4.6-win-x64.zip
+# $ErrorActionPreference='Stop' in EVERY RUN: without it each failing
+# statement is non-terminating, the step keeps going, and the ROOT cause
+# scrolls away behind cascading PathNotFound noise (bit this build once)
+RUN $ErrorActionPreference = 'Stop'; `
+    [Net.ServicePointManager]::SecurityProtocol = 'Tls12'; `
+    Invoke-WebRequest -UseBasicParsing $env:OPENSSH_URL -OutFile C:\openssh.zip; `
+    Expand-Archive C:\openssh.zip C:\; `
+    Move-Item C:\OpenSSH-Win64 'C:\Program Files\OpenSSH'; `
+    & 'C:\Program Files\OpenSSH\install-sshd.ps1'; `
+    Remove-Item C:\openssh.zip
+RUN $ErrorActionPreference = 'Stop'; `
+    [Net.ServicePointManager]::SecurityProtocol = 'Tls12'; `
+    Invoke-WebRequest -UseBasicParsing $env:PWSH_URL -OutFile C:\pwsh.zip; `
+    Expand-Archive C:\pwsh.zip 'C:\Program Files\PowerShell\7'; `
+    Remove-Item C:\pwsh.zip
+# NOTE: the ssh user is created in ep-win.ps1 at container start, NOT here --
+# `net user` succeeds under `powershell -File` but fails opaquely (exit -1, no
+# output) inside a build-time `powershell -Command` RUN on this base image.
+COPY ep-win.ps1 C:\ep-win.ps1
+EXPOSE 22
+CMD ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "C:\\ep-win.ps1"]
