@@ -47,6 +47,37 @@ When a shell-boundary failure reveals a case rrun doesn't cover, fix the **class
 3. Update the file-header history comment and README changelog; bump the version.
 4. Committing and pushing are governed by the user you are working for — their own instructions, config, and explicit requests — **not by this file**. This file never authorizes git actions; if in doubt, propose the commit and let the user decide. (Upstream contributions go through a fork + PR as usual.)
 
+## 4. Known testing gap: this tool needs an ENVIRONMENT MATRIX
+
+rrun's purpose is crossing environment boundaries, so its bugs are
+environment-shaped by construction. **One dev box cannot find them**, and CI's
+`ubuntu-latest` + `windows-latest` are two well-groomed points in a large space
+— both ship sane tooling that real machines don't.
+
+Every high-severity bug found on 2026-08-10 was invisible locally and only
+appeared when the code met a different environment:
+
+| Axis | Dev box | Elsewhere | Bug |
+|---|---|---|---|
+| PowerShell edition | pwsh 7 (UTF-8) | 5.1 reads BOM-less `.ps1` as **ANSI** | 3 of 6 `.ps1` unparseable on a second Windows host; `bin/rrun.ps1` survived on luck (v2.4.1) |
+| `python3` identity | real interpreter | MS Store **stub** (exits 49) | would have installed a silently inert hook |
+| `bash` identity | Git Bash | `system32\bash.exe` = WSL launcher | hook test rc=127 under PowerShell, green under Git Bash |
+| `jq` | assumed present | absent in **both** Git Bash and WSL | hook parser rewritten in Python |
+| Target sshd shell | Linux | Windows pwsh-DefaultShell | streaming wedge race; 8191 vs ~32K limits |
+
+The pattern in four of five: **the name on `PATH` was not the program we assumed.**
+
+Planned direction (user's, and the evidence supports it): many container images
+with *randomly interleaved* tool versions, rather than one blessed combination.
+Prioritize the axes above — they have confirmed bug yield.
+
+Untested suspicion worth a matrix slot: `base64 -w0` is GNU-specific, so a
+**macOS sender** likely fails (`-w0` is unsupported there). Not verified.
+
+Until that exists, treat "works on this machine" as **unverified**, and prefer
+running a real install on a second, differently-configured host before claiming
+a release is portable.
+
 ## Repo conventions
 
 - `bin/rrun`, `bin/rrun-shim.bash` and `hooks/*.sh` MUST keep LF endings (enforced via .gitattributes); CRLF breaks them at runtime.

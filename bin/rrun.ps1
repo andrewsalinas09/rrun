@@ -29,7 +29,14 @@
 #          BYTES (ReadAllText BOM-decoded + UTF-8 re-encoded bash/sh files --
 #          text preservation, not bytes) + cleanup traps on the temp file;
 #          v1.10 stdin (-) is raw process stdin bytes too (last text-typed
-#          ingestion path; Console.In re-encoded UTF-16/binary stdin).
+#          ingestion path; Console.In re-encoded UTF-16/binary stdin);
+#          v1.11 native stderr no longer THROWS under Windows PowerShell 5.1 --
+#          `& native.exe` raises a terminating NativeCommandError while
+#          EAP=Stop the moment the child writes to stderr, so a payload that
+#          merely printed a warning made the shim throw instead of returning
+#          the payload's exit code (transparency violation). pwsh 7 does not
+#          do this, so it survived every local run; a real install on a 5.1
+#          host caught it. EAP is relaxed around all three native calls.
 $ErrorActionPreference = 'Stop'
 
 function Fail([string]$msg) {
@@ -121,6 +128,15 @@ if ($hostSpec -eq 'local') {
     $wrapper = '$ProgressPreference=''SilentlyContinue''; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(''' + $pb64 + ''')) + [char]10 + ''if (-not $?) { exit 1 }''))'
     $b64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($wrapper))
     if ($dry) { Write-Output "powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $b64"; exit 0 }
+    # Native stderr must NOT become a terminating error. Under Windows
+    # PowerShell 5.1 (the DEFAULT powershell.exe), `& native.exe` raises a
+    # terminating NativeCommandError while EAP=Stop as soon as the child writes
+    # to stderr -- so a payload that merely PRINTS A WARNING made rrun throw
+    # instead of returning the payload's exit code. That breaks the transparency
+    # contract: rrun reserves nothing and adds no semantics of its own. pwsh 7
+    # does not do this, which is why it went unnoticed until a real install ran
+    # on a 5.1 host. See v1.11.
+    $ErrorActionPreference = 'Continue'
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $b64
     exit $LASTEXITCODE
   } else {
@@ -132,6 +148,7 @@ if ($hostSpec -eq 'local') {
     # and catchable signals. Exit status = the executor's own.
     $run = 't=$(mktemp) || exit 125; trap "rm -f \"$t\"" 0; trap exit 1 2 15; echo ' + $b64 + ' | base64 -d > "$t" || { echo rrun: local decode failed >&2; exit 125; }; ' + $shell + ' "$t"'
     if ($dry) { Write-Output "wsl -e bash -c `"$run`""; exit 0 }
+    $ErrorActionPreference = 'Continue'   # see v1.11 note above: native stderr must not throw
     & wsl.exe -e bash -c $run
     exit $LASTEXITCODE
   }
@@ -148,5 +165,7 @@ if ($dry) {
   # could re-parse). Warn on stderr; stdout stays machine-parseable.
   [Console]::Error.WriteLine('rrun: dry-run below is bash-quoted (run it from bash/WSL; not PowerShell paste-safe)')
 }
+# see v1.11 note: a REMOTE payload writing to stderr must not make the shim throw
+$ErrorActionPreference = 'Continue'
 & wsl.exe -e sh -c 'exec "$HOME/.local/bin/rrun" "$@"' rrun @opts $hostSpec @rest
 exit $LASTEXITCODE

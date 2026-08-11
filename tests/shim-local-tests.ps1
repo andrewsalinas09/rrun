@@ -56,6 +56,22 @@ Remove-Item $rawFile -ErrorAction SilentlyContinue
 $out = & $shim -n local -c 'Write-Output SHOULD-NOT-RUN' 2>&1 | Out-String
 Check 'REGRESSION: -n local dry-runs, never executes' ($out -notmatch 'SHOULD-NOT-RUN\s*$' -and $out -match 'EncodedCommand')
 
+# REGRESSION (v1.11): a payload that writes to STDERR must not make the shim
+# THROW. Under Windows PowerShell 5.1 -- the default powershell.exe -- a native
+# command raises a terminating NativeCommandError while EAP=Stop as soon as the
+# child writes to stderr, so rrun threw instead of returning the payload's exit
+# code. That is a transparency violation: rrun reserves nothing. Invoked
+# IN-PROCESS with & on purpose; running the shim as a -File child would swallow
+# the throw into an exit code and hide the bug (it did, on the first attempt).
+$threw = $false
+try { $out = & $shim local -c '[Console]::Error.WriteLine("stderr-noise"); exit 0' 2>&1 | Out-String }
+catch { $threw = $true }
+Check 'REGRESSION: stderr-writing payload does not make the shim throw' (-not $threw)
+Check 'REGRESSION: stderr-writing payload still exits 0' ($LASTEXITCODE -eq 0) "exit=$LASTEXITCODE"
+$threw = $false
+try { $out = & $shim local -c 'no-such-command-xyz' 2>&1 | Out-String } catch { $threw = $true }
+Check 'REGRESSION: failing payload returns a code rather than throwing' (-not $threw)
+
 # Failures must be LOUD (stderr text) AND non-zero exit -- a transport that
 # swallows either is worse than useless for debugging. Exit codes must match a
 # bare `powershell -Command`: any failure -> non-zero, explicit `exit N` -> N.

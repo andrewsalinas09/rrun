@@ -18,8 +18,15 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: PowerShell shim local-mode tests (real powershell.exe)
+      - name: PowerShell shim local-mode tests (pwsh 7)
         shell: pwsh
+        run: ./tests/shim-local-tests.ps1
+      # Windows PowerShell 5.1 is the DEFAULT powershell.exe and differs in ways
+      # that have shipped bugs: BOM-less .ps1 read as ANSI, and native stderr
+      # raising a terminating NativeCommandError under EAP=Stop. Passing under
+      # pwsh 7 proves nothing about 5.1, so run the whole suite under both.
+      - name: PowerShell shim local-mode tests (Windows PowerShell 5.1)
+        shell: powershell
         run: ./tests/shim-local-tests.ps1
       # settings.json merge safety — runs against throwaway config dirs
       - name: Hook installer tests (settings.json merge)
