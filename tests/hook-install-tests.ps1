@@ -14,13 +14,19 @@ function Check([string]$name, [bool]$ok, [string]$detail = '') {
 }
 function NewDir { $d = Join-Path ([IO.Path]::GetTempPath()) ("rrun-hooktest-" + [Guid]::NewGuid().ToString('N').Substring(0, 8)); New-Item -ItemType Directory -Force -Path $d | Out-Null; $d }
 function ReadJson([string]$d) { Get-Content -Raw (Join-Path $d 'settings.json') | ConvertFrom-Json }
+# NOTE: always call OurEntries as @(OurEntries $j).Count, never (OurEntries $j).Count.
+# PowerShell unrolls a single-element array returned from a function, so the
+# caller gets a SCALAR -- and under Windows PowerShell 5.1 a PSCustomObject has
+# no .Count, so the comparison silently comes out $null -ne 1 and the assertion
+# fails even though the merge was correct. PS 7 added .Count to every object,
+# which hid this until the suite ran on a 5.1 host.
 function OurEntries($j) { @(@($j.hooks.PreToolUse) | Where-Object { @($_.hooks) | Where-Object { "$($_.command)" -match 'rrun-boundary-warn' } }) }
 
 Write-Host '[fresh config dir (no settings.json)]'
 $d = NewDir
 & $installer -ConfigDir $d -RepoRoot $repo -Quiet
 $j = ReadJson $d
-Check 'creates settings.json with our hook' ((OurEntries $j).Count -eq 1)
+Check 'creates settings.json with our hook' (@(OurEntries $j).Count -eq 1)
 Check 'matcher covers Bash and PowerShell' ((OurEntries $j)[0].matcher -eq 'Bash|PowerShell')
 Check 'deploys launcher + detector' ((Test-Path (Join-Path $d 'hooks\rrun-boundary-warn.sh')) -and (Test-Path (Join-Path $d 'hooks\rrun-boundary-warn.py')))
 $sh = [IO.File]::ReadAllText((Join-Path $d 'hooks\rrun-boundary-warn.sh'))
@@ -47,7 +53,7 @@ $d = NewDir
 '@ | Set-Content -Path (Join-Path $d 'settings.json') -Encoding UTF8
 & $installer -ConfigDir $d -RepoRoot $repo -Quiet
 $j = ReadJson $d
-Check 'our hook added' ((OurEntries $j).Count -eq 1)
+Check 'our hook added' (@(OurEntries $j).Count -eq 1)
 Check "someone else's PreToolUse hook survives" (@(@($j.hooks.PreToolUse) | Where-Object { $_.matcher -eq 'Write' }).Count -eq 1)
 Check 'PostToolUse hooks survive' ($j.hooks.PostToolUse[0].hooks[0].command -eq 'prettier --write')
 Check 'unrelated top-level keys survive' ($j.model -eq 'opus' -and $j.env.DEBUG -eq 'true')
@@ -58,7 +64,7 @@ Write-Host '[idempotency: three runs]'
 & $installer -ConfigDir $d -RepoRoot $repo -Quiet
 & $installer -ConfigDir $d -RepoRoot $repo -Quiet
 $j = ReadJson $d
-Check 'still exactly one rrun entry after 3 runs' ((OurEntries $j).Count -eq 1)
+Check 'still exactly one rrun entry after 3 runs' (@(OurEntries $j).Count -eq 1)
 Check "still exactly one of someone else's" (@(@($j.hooks.PreToolUse) | Where-Object { $_.matcher -eq 'Write' }).Count -eq 1)
 Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue
 

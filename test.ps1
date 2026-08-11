@@ -119,6 +119,19 @@ Check 'invalid -s rejected by shim' ($LASTEXITCODE -eq 2)
 & $shim local -c 2>$null
 Check 'REGRESSION: local -c with no command exits 2' ($LASTEXITCODE -eq 2)
 
+Write-Host '[PowerShell edition matrix]'
+# Both shipped 5.1-only bugs (native-arg quoting mangling \" ; native stderr
+# throwing under EAP=Stop) passed every pwsh-7 run. Exercise both editions.
+& (Join-Path $repo 'tests\ps-edition-checks.ps1')
+Check "shim checks pass under ambient PowerShell ($($PSVersionTable.PSVersion))" ($LASTEXITCODE -eq 0)
+$ps51 = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+if (Test-Path $ps51) {
+  & $ps51 -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'tests\ps-edition-checks.ps1')
+  Check 'shim checks pass under Windows PowerShell 5.1 (the DEFAULT powershell.exe)' ($LASTEXITCODE -eq 0)
+} else {
+  Write-Host '    SKIP  Windows PowerShell 5.1 not present'
+}
+
 Write-Host '[installed: Git Bash shim]'
 $gitBash = "$env:ProgramFiles\Git\bin\bash.exe"
 if (Test-Path $gitBash) {

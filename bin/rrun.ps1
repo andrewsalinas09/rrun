@@ -36,7 +36,13 @@
 #          merely printed a warning made the shim throw instead of returning
 #          the payload's exit code (transparency violation). pwsh 7 does not
 #          do this, so it survived every local run; a real install on a 5.1
-#          host caught it. EAP is relaxed around all three native calls.
+#          host caught it. EAP is relaxed around all three native calls;
+#          v1.12 local bash/sh path worked ONLY under pwsh 7: the wrapper's
+#          trap used \"-escaped quotes, and Windows PowerShell 5.1 re-quotes
+#          native arguments with legacy rules that mangle them, so bash got a
+#          truncated `trap "rm -f \"` -> "trap: usage: trap [-lp] ..." and the
+#          entire -s bash local path failed. Trap body now uses single quotes;
+#          nothing with escaped quotes may cross as a native argument.
 $ErrorActionPreference = 'Stop'
 
 function Fail([string]$msg) {
@@ -146,7 +152,16 @@ if ($hostSpec -eq 'local') {
     # decoder failures (silent success), s=$(...) stripped trailing newlines at
     # execution time, and the traps clean the decoded payload up on normal exit
     # and catchable signals. Exit status = the executor's own.
-    $run = 't=$(mktemp) || exit 125; trap "rm -f \"$t\"" 0; trap exit 1 2 15; echo ' + $b64 + ' | base64 -d > "$t" || { echo rrun: local decode failed >&2; exit 125; }; ' + $shell + ' "$t"'
+    # The trap body uses SINGLE quotes: 'rm -f "$t"', never "rm -f \"$t\"".
+    # Windows PowerShell 5.1 re-quotes native-command arguments with legacy
+    # rules that mangle backslash-escaped quotes, so the \" form arrived at bash
+    # as `trap "rm -f \"` -> `trap: usage: trap [-lp] ...` and the whole local
+    # bash/sh path failed. pwsh 7 passes it through intact, so this was invisible
+    # until a real 5.1 host ran it. Same class the tool exists to kill -- a
+    # metacharacter eaten at an argument boundary -- so the rule is rrun's own:
+    # nothing with escaped quotes may cross as a native argument. (The payload
+    # itself already crosses as inert base64; only this wrapper was at risk.)
+    $run = 't=$(mktemp) || exit 125; trap ''rm -f "$t"'' 0; trap exit 1 2 15; echo ' + $b64 + ' | base64 -d > "$t" || { echo rrun: local decode failed >&2; exit 125; }; ' + $shell + ' "$t"'
     if ($dry) { Write-Output "wsl -e bash -c `"$run`""; exit 0 }
     $ErrorActionPreference = 'Continue'   # see v1.11 note above: native stderr must not throw
     & wsl.exe -e bash -c $run
