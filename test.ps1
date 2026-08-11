@@ -156,6 +156,25 @@ Write-Host '[core regression suite (mocked ssh, in WSL)]'
 wsl.exe -e bash (ToWslPath (Join-Path $repo 'tests\core-tests.sh'))
 Check 'tests/core-tests.sh all pass' ($LASTEXITCODE -eq 0)
 
+Write-Host '[Claude Code boundary hook]'
+# The hook fails OPEN at runtime (it must never block a tool call), so a missing
+# Python 3 would leave it silently inert forever. Surface that HERE instead.
+$py = $null
+foreach ($c in 'python3', 'python', 'py') {
+  if (-not (Get-Command $c -ErrorAction SilentlyContinue)) { continue }
+  # `python3` on Windows is often the Microsoft Store stub: on PATH, exits 49.
+  try { & $c -c 'import sys; sys.exit(0 if sys.version_info[0]==3 else 1)' 2>$null } catch { continue }
+  if ($LASTEXITCODE -eq 0) { $py = $c; break }
+}
+Check 'dependency: a working Python 3 is on PATH (else the hook is inert)' ($null -ne $py) `
+  'install Python 3 and re-run install.ps1, or use install.ps1 -SkipClaudeHook'
+if ($py) {
+  & $py (Join-Path $repo 'tests\hook-tests.py')
+  Check 'tests/hook-tests.py all pass' ($LASTEXITCODE -eq 0)
+}
+& (Join-Path $repo 'tests\hook-install-tests.ps1') | Out-Null
+Check 'tests/hook-install-tests.ps1 all pass (settings.json merge is safe)' ($LASTEXITCODE -eq 0)
+
 if ($TargetHost) {
   Write-Host "[remote: $TargetHost]"
   $out = & $shim -s $TargetShell $TargetHost -c 'echo rrun-remote-ok' 2>&1 | Out-String

@@ -10,6 +10,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Core regression tests (mocked ssh)
         run: bash tests/core-tests.sh
+      - name: Boundary-hook tests (detector + launcher)
+        run: python3 tests/hook-tests.py
   windows-shim:
     runs-on: windows-latest
     steps:
@@ -17,3 +19,12 @@ jobs:
       - name: PowerShell shim local-mode tests (real powershell.exe)
         shell: pwsh
         run: ./tests/shim-local-tests.ps1
+      # settings.json merge safety — runs against throwaway config dirs
+      - name: Hook installer tests (settings.json merge)
+        shell: pwsh
+        run: ./tests/hook-install-tests.ps1
+      # Windows too: the launcher must survive Git Bash + the `python3` Store
+      # stub, which is exactly where naive interpreter lookup breaks.
+      - name: Boundary-hook tests (detector + launcher)
+        shell: bash
+        run: python tests/hook-tests.py

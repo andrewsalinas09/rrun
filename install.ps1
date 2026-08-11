@@ -3,8 +3,26 @@
 # including the ~/.rrun/bash_env file and the sourcing block in ~/.bashrc.
 # Requires: Windows 10/11, WSL with a default Linux distro, Git Bash (for the bash shim).
 # Pure-Linux machines: skip this; just copy bin/rrun to ~/.local/bin and chmod +x.
+param(
+  # Skip installing the Claude Code boundary-advisory hook (see hooks/). The
+  # rest of rrun is unaffected — the hook is a habit guard, not a dependency.
+  [switch]$SkipClaudeHook
+)
 $ErrorActionPreference = 'Stop'
 $repo = $PSScriptRoot
+
+function Find-Python3 {
+  # Returns the name of a WORKING python3, or $null. Name lookup alone is not
+  # enough: on Windows `python3` is commonly the Microsoft Store stub — present
+  # on PATH, exits 49, prints "Python was not found". So each candidate must
+  # actually run and report major version 3.
+  foreach ($c in 'python3', 'python', 'py') {
+    if (-not (Get-Command $c -ErrorAction SilentlyContinue)) { continue }
+    try { & $c -c 'import sys; sys.exit(0 if sys.version_info[0]==3 else 1)' 2>$null } catch { continue }
+    if ($LASTEXITCODE -eq 0) { return $c }
+  }
+  return $null
+}
 
 function ToWslPath([string]$p) {
   $r = $p -replace '\\', '/'
@@ -12,7 +30,7 @@ function ToWslPath([string]$p) {
   return $r
 }
 
-Write-Host '[1/6] WSL core -> ~/.local/bin/rrun'
+Write-Host '[1/7] WSL core -> ~/.local/bin/rrun'
 $srcWsl = ToWslPath (Join-Path $repo 'bin\rrun')
 # the repo path rides as $1 (positional data), never interpolated into shell
 # source — a path containing $ ( ) etc. must not be parsed by the WSL shell
@@ -20,7 +38,7 @@ $sh = 'mkdir -p "$HOME/.local/bin" && tr -d ''\r'' < "$1" > "$HOME/.local/bin/rr
 wsl.exe -e sh -c $sh sh $srcWsl
 if ($LASTEXITCODE -ne 0) { throw 'WSL core install failed (is a WSL distro installed and running?)' }
 
-Write-Host '[2/6] Windows shims -> %USERPROFILE%\.local\bin'
+Write-Host '[2/7] Windows shims -> %USERPROFILE%\.local\bin'
 $dest = Join-Path $env:USERPROFILE '.local\bin'
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 # bash shim must land with LF endings and no BOM or Git Bash chokes on the shebang
@@ -34,14 +52,14 @@ if (($userPath -split ';') -notcontains $dest) {
   Write-Host "  added $dest to user PATH (takes effect in new sessions)"
 }
 
-Write-Host '[3/6] Boundary env file -> ~/.rrun/bash_env (always refreshed)'
+Write-Host '[3/7] Boundary env file -> ~/.rrun/bash_env (always refreshed)'
 $rrunDir = Join-Path $env:USERPROFILE '.rrun'
 New-Item -ItemType Directory -Force -Path $rrunDir | Out-Null
 $envFile = Join-Path $rrunDir 'bash_env'
 $snippet = (Get-Content -Raw (Join-Path $repo 'profile\bash_env.sh')) -replace "`r", ''
 [IO.File]::WriteAllText($envFile, $snippet)
 
-Write-Host '[4/6] Shell integration (~/.bashrc, ~/.bash_profile)'
+Write-Host '[4/7] Shell integration (~/.bashrc, ~/.bash_profile)'
 $srcLine = '[ -f "$HOME/.rrun/bash_env" ] && . "$HOME/.rrun/bash_env"'
 $block = "# >>> claude-shell-boundary >>>`n$srcLine`n# <<< claude-shell-boundary <<<"
 $blockPat = '(?s)# >>> claude-shell-boundary >>>.*?# <<< claude-shell-boundary <<<'
@@ -73,7 +91,7 @@ if (-not (Test-Path $bp)) {
   Set-MarkerBlock $bp
 }
 
-Write-Host '[5/6] User environment variables'
+Write-Host '[5/7] User environment variables'
 $wantEnv = ($env:USERPROFILE -replace '\\', '/') + '/.rrun/bash_env'
 $oldDefault = ($env:USERPROFILE -replace '\\', '/') + '/.bashrc'
 $curBashEnv = [Environment]::GetEnvironmentVariable('BASH_ENV', 'User')
@@ -88,7 +106,38 @@ if (-not [Environment]::GetEnvironmentVariable('PYTHONIOENCODING', 'User')) {
   Write-Host '  PYTHONIOENCODING=utf-8'
 }
 
-Write-Host '[6/6] Verify — full smoke suite'
+Write-Host '[6/7] Claude Code boundary hook -> <claude-config>/hooks'
+# Advisory PreToolUse hook: warns when a Bash/PowerShell command hand-crosses an
+# interpreter boundary rrun already covers. Warn-only, never blocks, and
+# "# no-rrun" in a command silences it. See hooks/rrun-boundary-warn.py for why
+# a prose rule was not enough.
+if ($SkipClaudeHook) {
+  Write-Host '  skipped (-SkipClaudeHook)'
+} else {
+  $cfgDir = if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { Join-Path $env:USERPROFILE '.claude' }
+  # merge + deploy lives in hooks/install-hook.ps1 so it can be regression-tested
+  # against throwaway config dirs (tests/hook-install-tests.ps1)
+  & (Join-Path $repo 'hooks\install-hook.ps1') -ConfigDir $cfgDir -RepoRoot $repo
+
+  # Fail LOUD here, not silently at runtime: the launcher deliberately exits 0
+  # when no interpreter exists (it must never block a tool call), so a missing
+  # dependency would otherwise leave a hook that is silently inert forever.
+  $py = Find-Python3
+  if ($py) {
+    Write-Host "  dependency OK: Python 3 via '$py'"
+  } else {
+    Write-Warning @'
+Python 3 was NOT found, so the boundary hook is installed but INERT.
+It fails open by design (it will never block your commands) — but it will also
+never warn you. To activate it, install Python 3 and re-run install.ps1:
+  winget install Python.Python.3.13     (or https://python.org/downloads)
+Ask Claude to run that for you if you would rather not. Prefer no hook at all?
+Re-run with:  .\install.ps1 -SkipClaudeHook
+'@
+  }
+}
+
+Write-Host '[7/7] Verify — full smoke suite'
 & (Join-Path $repo 'test.ps1')
 if ($LASTEXITCODE -ne 0) { throw "verification failed: $LASTEXITCODE test(s) did not pass" }
 
