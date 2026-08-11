@@ -147,6 +147,83 @@ produced 0 incidents. Tokens were a wash (before 66.7k / after 92.3k — the
 after hostile agent spent freely on double verification); wall time favored
 installed 160s vs 243s.
 
+## Experiment 3b: the truly cold arm (fresh session, zero rrun knowledge)
+
+Getting a genuinely un-steered agent turned out to be the hardest part of the
+whole series, and the failed attempts are themselves the finding:
+
+1. **Uninstalling the tool didn't blind the agents** (experiment 3 — they ran
+   `bin/rrun` from the repo checkout).
+2. **Pinning them to a neutral working directory didn't either.** Subagents
+   spawned into `C:\Users\andre\Desktop\WorkingDir` still opened with "rrun
+   isn't on PATH, let me check the repo copy" and "let me read rrun's usage,
+   per this repo's rules".
+3. **Renaming `CLAUDE.md` aside didn't either.** Subagents do not read
+   instruction files from disk at spawn time; they inherit the *parent
+   session's* snapshot of them. **A clean control agent cannot be spawned
+   from a contaminated session at all** — the steering rides in the context,
+   not the filesystem. The only way to get one is a brand-new session started
+   in a neutral directory, which a human must launch.
+
+So the cold arm was run by the user in a fresh session rooted at
+`Desktop\WorkingDir`, with rrun uninstalled machine-wide, no advisory hook,
+and no project instructions. Same two tasks, same ground truth.
+
+Incidental finding: the fresh session started on Fable 5 and was
+**auto-switched to Opus 4.8 by safety classifiers, twice, triggered by the
+nested-ssh command shape itself** (a third command — a `python3` heredoc
+reading a prior session transcript — was blocked outright). Deep-chain
+administration looks like the thing classifiers watch for, which is its own
+environment axis nobody designs for. The cold arm is therefore Opus 4.8, not
+model-matched to the other arms; it is labeled, not hidden.
+
+| Task | COLD (Opus 4.8, no rrun) | INSTALLED (Fable, rrun) |
+|---|---|---|
+| 3-hop chain report | correct, no corruption — 4 cmds, **129s** | correct — 4 cmds, **51s** |
+| hostile literal through 3 hops | correct (78 B, md5 match) — ~12 cmds, **437s** | correct — 7 cmds, **109s** |
+
+**The cold agent was excellent, and that is exactly the point.** It never gave
+up and never shipped a wrong value. On the chain report it worked hop by hop
+(verify link 1, then 2, then 3, then gather), and independently invented the
+same hazard-dodges the constrained agents found: `printenv PATH` instead of
+`echo $PATH` so no `$` had to survive intermediate hops, innermost command
+single-quoted so `;` and `<` bind only on the far host.
+
+**On the hostile payload it re-derived rrun.** With the bytes prescribed, no
+dodge was available, so it: wrote the content to a file with the Write tool
+(guaranteeing literal bytes), base64-encoded it, then built a per-hop
+re-armoring chain where each layer carries only base64 and pipes the decoded
+next-layer script into the next host's `sh` over stdin:
+
+```sh
+S3="echo $CB64 | base64 -d > /tmp/abmarker5.txt; wc -c ...; md5sum ..."
+S3B64=$(printf '%s' "$S3" | base64 -w0)
+S2="echo $S3B64 | base64 -d | ssh rrun-ab-c3 sh"
+S2B64=$(printf '%s' "$S2" | base64 -w0)
+S1="echo $S2B64 | base64 -d | ssh rrun-ab-c2 sh"
+...
+```
+
+That is `bin/rrun`'s `compose()` loop, hand-written from scratch — the **third
+independent reinvention** of this design across the series (after experiment
+2's stock agent and the constrained hostile-payload agent). Along the way it
+also had to rediscover **MSYS path mangling** (`wsl bash /mnt/...` became
+`C:/Program Files/Git/mnt/...`; fixed with `MSYS_NO_PATHCONV=1`) — a class
+the installed shims absorb silently.
+
+**Reading.** The design is validated so strongly that capable agents converge
+on it unprompted — and *that convergence is the cost*. The cold agent spent
+~7 minutes and a dozen commands (plus two classifier interventions and one
+blocked command) re-deriving, unverified and single-use, what `rrun -s bash
+a,b,c payload.sh` does in ~110 seconds with the whole environment matrix
+behind it. Caveat: part of the cold run's time was rediscovering the chain
+topology, which the installed twin received in its prompt; the gap is real
+but not purely boundary-crossing. And the field-failure mode (give up
+entirely, as happened on a real 3-deep tailscale chain) did NOT reproduce —
+a strong agent on a *dedicated* chain task is patient. Give-up remains a
+long-context, incidental-boundary phenomenon, which is what the experiment
+below is designed to test.
+
 ## Designed, NOT yet run: the long-context experiment
 
 Both experiments above test the regime where agents are fresh and the
