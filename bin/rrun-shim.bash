@@ -21,7 +21,7 @@
 #                             no USB passthrough). Defaults to -s sh; streams the
 #                             payload over stdin past RRUN_STREAM_LIMIT so the
 #                             32767-char Windows command line can't truncate it.
-# usage mirrors WSL rrun:  rrun [-s ps|bash|sh] [-J jumps] [-n] <host[,hop2,...]|local|adb[:serial]> <script|-|-c "cmds">
+# usage mirrors WSL rrun:  rrun [-s ps|bash|sh|wsl] [-J jumps] [-n] <host[,hop2,...]|local|adb[:serial]> <script|-|-c "cmds">
 # history: v1 2026-08-10 created from transcript-error audit; v1.1 $HOME trampoline,
 #          CLIXML suppression; v1.2 review fixes — -n honored in local mode (was
 #          EXECUTING on dry-run), -c args no longer path-translated, -s validated,
@@ -46,7 +46,11 @@
 #          forwarded (adb + USB are Windows-side); TMPDIR pinned to
 #          /data/local/tmp (Android has no /tmp and mktemp is the wrapper's
 #          first statement); stdin-streaming above RRUN_STREAM_LIMIT so the
-#          32767-char Windows command line cannot truncate a big payload.
+#          32767-char Windows command line cannot truncate a big payload;
+#          v1.11 2026-08-19 -s wsl (bash inside WSL on a Windows host, core
+#          v2.9): accepted and forwarded for remote hosts; for host "local"
+#          it IS -s bash (this machine is the Windows host — the payload runs
+#          under bash in this machine's WSL); rejected for adb targets.
 set -euo pipefail
 
 xlate() {  # absolute Windows path -> /mnt/<d>/... for WSL
@@ -61,7 +65,7 @@ opts=() shell="" dry=0 jump=0
 while [[ ${1:-} == -* && ${1:-} != -c && ${1:-} != - ]]; do
   case $1 in
     -s)
-      case ${2:-} in ps|bash|sh) ;; *) echo "rrun: -s must be ps, bash or sh" >&2; exit 2 ;; esac
+      case ${2:-} in ps|bash|sh|wsl) ;; *) echo "rrun: -s must be ps, bash, sh or wsl" >&2; exit 2 ;; esac
       shell=$2; opts+=(-s "$2"); shift 2 ;;
     -J) jump=1; opts+=(-J "${2:?rrun: -J needs an argument}"); shift 2 ;;
     -n) dry=1; opts+=(-n); shift ;;
@@ -69,7 +73,7 @@ while [[ ${1:-} == -* && ${1:-} != -c && ${1:-} != - ]]; do
   esac
 done
 if (( $# < 2 )); then
-  echo 'usage: rrun [-s ps|bash|sh] [-J jumps] [-n] <host[,hop2,...]|local> <script | - | -c "cmds">' >&2
+  echo 'usage: rrun [-s ps|bash|sh|wsl] [-J jumps] [-n] <host[,hop2,...]|local> <script | - | -c "cmds">' >&2
   exit 2
 fi
 host=$1; shift
@@ -94,8 +98,8 @@ if [[ $host == adb || $host == adb:* ]]; then
   esac
   # Stock Android ships /system/bin/sh and neither bash nor PowerShell.
   [[ -z $shell ]] && shell=sh
-  if [[ $shell == ps ]]; then
-    echo 'rrun: -s ps is not valid for an adb target (Android has no PowerShell); use -s sh' >&2
+  if [[ $shell == ps || $shell == wsl ]]; then
+    echo "rrun: -s $shell is not valid for an adb target (Android has neither PowerShell nor WSL); use -s sh" >&2
     exit 2
   fi
   # TMPDIR pinned because mktemp is this wrapper's first statement and Android
@@ -145,6 +149,9 @@ if [[ $host == local ]]; then
   if [[ -z $shell ]]; then
     case "$src" in *.sh|*.bash) shell=bash ;; *) shell=ps ;; esac
   fi
+  # host "local" IS the Windows machine that has the WSL: -s wsl and -s bash
+  # mean the same thing here (payload runs under bash inside this machine's WSL).
+  [[ $shell == wsl ]] && shell=bash
   if [[ $shell == ps ]]; then
     # payload text never modified (a prefix broke param()/using payloads): fixed
     # wrapper sets ProgressPreference (CLIXML progress noise) and runs the

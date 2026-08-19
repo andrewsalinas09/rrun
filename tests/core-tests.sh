@@ -264,6 +264,48 @@ b64=$(sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' <<<"${ARGV[-1]}")
 [[ $rc == 0 && -z $b64 ]]
 check "empty -c '' composes as a no-op program (only missing -c is an error)" $?
 
+echo '[wsl target shell]'
+# -s wsl runs the payload under bash inside WSL on a WINDOWS remote. Before it
+# existed, -s bash against a Windows host tried to exec sh/bash ON THE WINDOWS
+# SIDE ("The term 'sh' is not recognized..."). The Windows side must look
+# exactly like -s ps — an -EncodedCommand bootstrap no gateway shell (cmd /
+# PowerShell / POSIX) can re-parse — and inside, the bootstrap must hand
+# rrun's POSIX wrapper to wsl.exe armored, never nested-quoted.
+wslpayload='echo wsl "double" $dollar `backtick`; ls ~'
+PATH="$stubpath" "$RRUN" -s wsl examplehost -c "$wslpayload" < /dev/null
+argv
+[[ ${ARGV[-1]} =~ ^powershell\ -NoProfile\ -ExecutionPolicy\ Bypass\ -EncodedCommand\ [A-Za-z0-9+/=]+$ ]]
+check 'wsl bootstrap contains only shell-inert characters (like ps)' $?
+boot=$(printf %s "${ARGV[-1]##* }" | base64 -d | iconv -f UTF-16LE -t UTF-8)
+[[ $boot == *'& wsl.exe -e sh -c $__c'* && $boot == *'exit $LASTEXITCODE'* && $boot == *'wsl.exe not found on target'* ]]
+check 'wsl bootstrap delivers via wsl.exe -e sh -c and guards a missing wsl.exe (loud 125)' $?
+wrap=$(sed -n "s/.*FromBase64String('\([A-Za-z0-9+/=]*\)').*/\1/p" <<<"$boot" | base64 -d)
+pb64=$(sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' <<<"$wrap")
+[[ $wrap == 't=$(mktemp)'* && $wrap == *'; bash "$t"'* && $(printf %s "$pb64" | base64 -d) == "$wslpayload" ]]
+check 'wsl payload survives double armoring byte-for-byte; bash executes it' $?
+# REGRESSION CLASS (ps-shim v1.12): the wrapper crosses a PowerShell native-
+# argument boundary — 5.1 mangles \"-escaped quotes there, so the wrapper may
+# carry plain balanced quotes ONLY (single-quoted trap body).
+[[ $wrap != *'\"'* && $wrap == *"trap 'rm -f \"\$t\"' 0"* ]]
+check 'wsl wrapper has no backslash-escaped quotes (5.1 native-arg rule)' $?
+
+RRUN_STREAM_LIMIT=10 PATH="$stubpath" "$RRUN" -s wsl examplehost -c 'echo big-wsl' < /dev/null
+argv
+boot=$(printf %s "${ARGV[-1]##* }" | base64 -d | iconv -f UTF-16LE -t UTF-8)
+wrap=$(sed -n "s/.*FromBase64String('\([A-Za-z0-9+/=]*\)').*/\1/p" <<<"$boot" | base64 -d)
+# The streamed bootstrap pipes stdin into wsl.exe explicitly; the PowerShell
+# pipe appends a CRLF, which GNU base64 -d rejects as garbage — the wrapper
+# must strip \r ahead of the decode.
+[[ $boot == *'[Console]::In.ReadToEnd() | & wsl.exe -e sh -c $__c'* ]] &&
+  [[ $wrap == *"tr -d '\r' | base64 -d > "* && $(base64 -d < "$STUB_OUT.stdin") == 'echo big-wsl' ]]
+check 'large wsl payload streams over stdin (explicit pipe, CR-stripping decode)' $?
+
+PATH="$stubpath" "$RRUN" -s wsl h1,h2 -c 'echo deep-wsl' < /dev/null
+argv
+inner=$(sed -n 's/.*echo \([A-Za-z0-9+/=]*\) | base64 -d.*/\1/p' <<<"${ARGV[-1]}" | base64 -d)
+[[ $inner =~ ^powershell\ -NoProfile\ -ExecutionPolicy\ Bypass\ -EncodedCommand\ [A-Za-z0-9+/=]+$ ]]
+check 'wsl target composes through nested hops exactly like ps' $?
+
 echo '[adb transport]'
 # adb is a second delivery boundary with ssh's structure (argv joined and parsed
 # by the device's sh, stdin forwarded, exit code passed through). A stub records
@@ -323,6 +365,8 @@ echo '[validation]'
 check 'metacharacter host token rejected' $?
 "$RRUN" -s ps adb -c x 2>/dev/null; [[ $? == 2 ]]
 check 'adb target with -s ps rejected (Android has no PowerShell)' $?
+"$RRUN" -s wsl adb -c x 2>/dev/null; [[ $? == 2 ]]
+check 'adb target with -s wsl rejected (Android has no WSL)' $?
 "$RRUN" 'adb,realhost' -c x 2>/dev/null; [[ $? == 2 ]]
 check 'adb in a non-final hop position rejected' $?
 "$RRUN" 'adb:bad;serial' -c x 2>/dev/null; [[ $? == 2 ]]

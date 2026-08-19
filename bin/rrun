@@ -5,9 +5,11 @@
 # that will execute it. For multi-hop chains, each intermediate ssh command is
 # itself re-armored, so quoting depth stays flat no matter how many hops.
 #
-# usage: rrun [-s ps|bash|sh] [-J jumphosts] [-n] <host[,host2,...]|adb[:serial]> <script | - | -c "cmds">
-#   -s ps|bash|sh  target shell on the FINAL host (default ps; *.sh/*.bash files -> bash;
-#                  adb targets default to sh — Android ships no bash and no PowerShell)
+# usage: rrun [-s ps|bash|sh|wsl] [-J jumphosts] [-n] <host[,host2,...]|adb[:serial]> <script | - | -c "cmds">
+#   -s ps|bash|sh|wsl  target shell on the FINAL host (default ps; *.sh/*.bash files -> bash;
+#                  adb targets default to sh — Android ships no bash and no PowerShell;
+#                  wsl = bash inside WSL on a WINDOWS host: the Windows side is
+#                  crossed exactly like ps, then wsl.exe carries the payload inward)
 #   -J jumphosts   ssh ProxyJump — preferred for hops when local can auth to the final host
 #   -n             dry-run: print the composed invocation (shell-quoted, paste-safe)
 #   host,host2     nested-hop chain (use when intermediate hosts hold the keys);
@@ -25,6 +27,9 @@
 #   * STREAMED bash/sh payloads cannot read stdin (the channel carries the
 #     payload). Non-streamed bash/sh payloads read the real ssh channel as of
 #     v2.3.3 (they used to read their own script text from the decode pipe).
+#     wsl payloads NEVER see the ssh channel stdin (embedded or streamed):
+#     the PowerShell bootstrap layer does not forward it to the wsl.exe
+#     child, so payload stdin reads get immediate EOF (measured, real host).
 #   * payload exit codes pass through UNTOUCHED — rrun reserves nothing. A
 #     transport-level decode failure exits 125 AND prints "rrun: ... decode
 #     failed" on stderr; the stderr marker (not the number) identifies it.
@@ -173,6 +178,25 @@
 #                 layer (`s=$(echo b64 | base64 -d)`) instead of nested-quoted,
 #                 so the device command's own single quotes never meet the ssh
 #                 layer's.
+#   v2.9  2026-08-19 WSL TARGET SHELL (-s wsl): bash inside WSL on a Windows
+#                 remote. Class fix per the RSI rule: `rrun -s bash <winhost>`
+#                 tried to exec sh/bash ON THE WINDOWS SIDE ("The term 'sh' is
+#                 not recognized...") — there was no way to reach a Windows
+#                 host's WSL without hand-quoting ssh→PowerShell→wsl.exe, the
+#                 exact boundary stack this tool exists to remove. The Windows
+#                 side is crossed exactly like -s ps (a fixed PowerShell
+#                 bootstrap rides as -EncodedCommand, inert under cmd/
+#                 PowerShell/POSIX gateways); the bootstrap base64-decodes
+#                 rrun's usual POSIX tempfile wrapper into $__c and hands it to
+#                 `wsl.exe -e sh -c $__c` as ONE native argument (plain
+#                 balanced quotes only — nothing with \" may cross a PowerShell
+#                 native-argument boundary, the ps-shim v1.12 lesson), so
+#                 quoting still never stacks; bash runs the payload inside WSL.
+#                 Streamed form pipes [Console]::In.ReadToEnd() into wsl.exe
+#                 (the PowerShell pipe appends CRLF, so the wrapper strips \r
+#                 ahead of base64 -d). Missing wsl.exe on the target exits 125
+#                 with a loud stderr marker. Rejected for adb targets (Android
+#                 has no WSL); multi-hop and -J compose exactly as -s ps does.
 set -euo pipefail
 
 # GNU base64 takes -w0; BSD/macOS base64 has no -w AT ALL (a macOS sender
@@ -196,7 +220,7 @@ done
 shift $((OPTIND-1))
 
 if (( $# < 2 )); then
-  echo 'usage: rrun [-s ps|bash|sh] [-J jumps] [-n] <host[,host2,...]|adb[:serial]> <script | - | -c "cmds">' >&2
+  echo 'usage: rrun [-s ps|bash|sh|wsl] [-J jumps] [-n] <host[,host2,...]|adb[:serial]> <script | - | -c "cmds">' >&2
   exit 2
 fi
 
@@ -239,12 +263,12 @@ if [[ -z $shell ]]; then
 fi
 
 case "$shell" in
-  ps|bash|sh) ;;
-  *) echo "rrun: -s must be ps, bash or sh (got '$shell')" >&2; exit 2 ;;
+  ps|bash|sh|wsl) ;;
+  *) echo "rrun: -s must be ps, bash, sh or wsl (got '$shell')" >&2; exit 2 ;;
 esac
 
-if (( adb_target )) && [[ $shell == ps ]]; then
-  echo "rrun: -s ps is not valid for an adb target (Android has no PowerShell); use -s sh" >&2
+if (( adb_target )) && [[ $shell == ps || $shell == wsl ]]; then
+  echo "rrun: -s $shell is not valid for an adb target (Android has neither PowerShell nor WSL); use -s sh" >&2
   exit 2
 fi
 if (( adb_target )) && [[ -n $jump ]]; then
@@ -348,6 +372,41 @@ if [[ $shell == ps ]]; then
   ps_stream_b64=$(printf %s "$ps_boot" | iconv -f UTF-8 -t UTF-16LE | b64enc)
 fi
 
+if [[ $shell == wsl ]]; then
+  # -s wsl: the payload runs under bash INSIDE WSL on a Windows target. Two
+  # boundaries are crossed, each with the armoring it already trusts:
+  #   Windows side — a fixed PowerShell bootstrap rides as -EncodedCommand,
+  #     inert under cmd.exe, PowerShell, and POSIX gateways alike (same
+  #     delivery shape as -s ps), so the remote sshd's DefaultShell never
+  #     parses anything of the payload's.
+  #   WSL side — the bootstrap base64-decodes rrun's usual POSIX tempfile
+  #     wrapper into $__c and hands it to `wsl.exe -e sh -c $__c` as ONE
+  #     native argument. The wrapper carries plain balanced quotes only:
+  #     nothing with \"-escaped quotes may cross a PowerShell native-argument
+  #     boundary (5.1 mangles them — the ps-shim v1.12 lesson), which is why
+  #     the trap body is single-quoted here, unlike the ssh POSIX branch in
+  #     build_inner whose whole wrapper sits inside outer single quotes.
+  # wsl.exe absent (no WSL on the target) is a transport failure: loud stderr
+  # marker + exit 125, never a silent success (Get-Command probe — exit
+  # $LASTEXITCODE after a throw would otherwise exit 0). The payload's own
+  # exit code passes back via $LASTEXITCODE; a PowerShell sshd gateway still
+  # flattens non-zero to 1, the same documented caveat as -s ps.
+  wsl_pre="t=\$(mktemp) || exit 125; trap 'rm -f \"\$t\"' 0; trap exit 1 2 15;"
+  wsl_post="|| { echo rrun: remote decode failed >&2; exit 125; }; bash \"\$t\""
+  wsl_guard="if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) { [Console]::Error.WriteLine('rrun: wsl.exe not found on target'); exit 125 }; "
+  wb=$(printf %s "$wsl_pre echo $payload_b64 | base64 -d > \"\$t\" $wsl_post" | b64enc)
+  wsl_boot="\$ProgressPreference='SilentlyContinue'; $wsl_guard\$__c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$wb')); & wsl.exe -e sh -c \$__c; exit \$LASTEXITCODE"
+  wsl_embed_b64=$(printf %s "$wsl_boot" | iconv -f UTF-8 -t UTF-16LE | b64enc)
+  # streamed: the bootstrap reads the payload base64 off the ssh channel itself
+  # and pipes it into wsl.exe — explicit, not inherited-handle, so it behaves
+  # the same under both PowerShell editions. The pipe-to-native appends a CRLF
+  # (and 5.1 re-encodes via $OutputEncoding — harmless, base64 is ASCII), and
+  # GNU base64 -d rejects a bare \r as garbage, so the wrapper strips it first.
+  wb=$(printf %s "$wsl_pre tr -d '\\r' | base64 -d > \"\$t\" $wsl_post" | b64enc)
+  wsl_boot="\$ProgressPreference='SilentlyContinue'; $wsl_guard\$__c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$wb')); [Console]::In.ReadToEnd() | & wsl.exe -e sh -c \$__c; exit \$LASTEXITCODE"
+  wsl_stream_b64=$(printf %s "$wsl_boot" | iconv -f UTF-8 -t UTF-16LE | b64enc)
+fi
+
 tmpfix=""
 if (( adb_target )); then tmpfix="TMPDIR=\${TMPDIR:-/data/local/tmp}; "; fi
 
@@ -363,6 +422,15 @@ build_inner() {  # $1: 0 = payload embedded in the command, 1 = payload on stdin
     ps)
       if (( st )); then c="powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $ps_stream_b64"
       else              c="powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $ps_embed_b64"
+      fi
+      ;;
+    wsl)
+      # same delivery shape as ps — a base64-armored -EncodedCommand bootstrap
+      # no gateway shell can re-parse; the bootstrap itself carries the payload
+      # into WSL (see the wsl_boot construction above), so multi-hop chains and
+      # -J compose here exactly as they do for ps.
+      if (( st )); then c="powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $wsl_stream_b64"
+      else              c="powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand $wsl_embed_b64"
       fi
       ;;
     *)

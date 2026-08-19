@@ -30,6 +30,11 @@ Check 'payload $(subst) and $VAR survive' ($out -match 'sub:armored') $out.Trim(
 & $shim -s bash local -c 'exit 7' 2>&1 | Out-Null
 Check 'local bash exit code passes through (7)' ($LASTEXITCODE -eq 7) "exit=$LASTEXITCODE"
 
+# -s wsl local IS -s bash local (this machine is the Windows host with the
+# WSL) -- must execute, under both editions, through the same native-arg path.
+$out = & $shim -s wsl local -c 'echo rrun-wsl-ok' 2>&1 | Out-String
+Check 'local wsl (bash inside WSL) executes' ($out -match 'rrun-wsl-ok') $out.Trim()
+
 # REGRESSION: a payload writing to stderr must not make the shim THROW.
 $threw = $false
 try { & $shim local -c '[Console]::Error.WriteLine("noise"); exit 0' 2>&1 | Out-Null } catch { $threw = $true }

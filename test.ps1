@@ -32,22 +32,26 @@ function ToWslPath([string]$p) {
 # content and rrun version (see README known issues). A wedged check must be a
 # LOUD failure, never a silently hung suite: WSL `timeout` maps a wedge to exit
 # 124, we sweep the stuck remote process, and retry.
-function Invoke-RrunStreamTimed([string]$RemoteHost, [string]$File, [int]$TimeoutSec = 60) {
-  # host/path ride as positional args ($1..$3), never interpolated into the
-  # bash source -- the same payload-as-data rule the tool itself enforces.
+function Invoke-RrunStreamTimed([string]$RemoteHost, [string]$File, [int]$TimeoutSec = 60, [string]$Shell = '') {
+  # host/path/shell ride as positional args ($1..$4), never interpolated into
+  # the bash source -- the same payload-as-data rule the tool itself enforces.
   # PS-side 2>&1 is REQUIRED in addition to the bash-side one: remote error text
   # arrives as a "#< CLIXML" stream, which PowerShell deserializes and re-routes
   # to its error stream -- without this merge it vanishes from the capture.
-  $out = wsl.exe -e bash -c 'timeout "$1" "$HOME/.local/bin/rrun" "$2" "$3" 2>&1' rrun-timed $TimeoutSec $RemoteHost (ToWslPath $File) 2>&1 | Out-String
+  if ($Shell) {
+    $out = wsl.exe -e bash -c 'timeout "$1" "$HOME/.local/bin/rrun" -s "$2" "$3" "$4" 2>&1' rrun-timed $TimeoutSec $Shell $RemoteHost (ToWslPath $File) 2>&1 | Out-String
+  } else {
+    $out = wsl.exe -e bash -c 'timeout "$1" "$HOME/.local/bin/rrun" "$2" "$3" 2>&1' rrun-timed $TimeoutSec $RemoteHost (ToWslPath $File) 2>&1 | Out-String
+  }
   @{ Out = $out; Exit = $LASTEXITCODE }
 }
 # PS 5.1-safe sweep: kill wedged EncodedCommand powershell.exe instances (old
 # enough to be a stuck streamed session, near-zero CPU) so retries start clean.
 $script:sweepCmd = 'Get-CimInstance Win32_Process -Filter "Name=''powershell.exe''" | ForEach-Object { if ($_.ProcessId -ne $PID -and $_.CommandLine -match "EncodedCommand" -and ((Get-Date) - $_.CreationDate).TotalSeconds -gt 45) { $p = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue; if ($p -and $p.TotalProcessorTime.TotalSeconds -lt 1) { Stop-Process -Id $_.ProcessId -Force } } }'
-function Invoke-RrunStreamRetry([string]$RemoteHost, [string]$File, [string]$ShimPath) {
+function Invoke-RrunStreamRetry([string]$RemoteHost, [string]$File, [string]$ShimPath, [string]$Shell = '') {
   $r = $null
   for ($try = 1; $try -le 3; $try++) {
-    $r = Invoke-RrunStreamTimed $RemoteHost $File
+    $r = Invoke-RrunStreamTimed $RemoteHost $File 60 $Shell
     if ($r.Exit -ne 124) { return $r }
     Write-Host "  WARN  streamed session wedged remotely (known Windows-sshd race; see README) -- sweeping, retry $try/3"
     & $ShimPath $RemoteHost -c $script:sweepCmd 2>$null | Out-Null
@@ -115,6 +119,12 @@ $out = & $shim -s bash local -c 'echo rrun-selftest-ok' 2>&1 | Out-String
 Check 'local bash (via WSL) executes' ($out -match 'rrun-selftest-ok')
 $payloadOut = & $shim -s bash local -c 'V=$(echo armored); echo "sub:$V"' 2>&1 | Out-String
 Check 'payload $(subst) and $VAR survive transport' ($payloadOut -match 'sub:armored')
+# -s wsl: remote composes the -EncodedCommand bootstrap (never a bare sh/bash
+# that the Windows side would choke on); local IS -s bash (this machine's WSL).
+$out = (& $shim -n -s wsl examplehost -c 'ls ~' 2>$null) -join ' '
+Check 'wsl target dry-run composes -EncodedCommand bootstrap' ($out -like 'ssh -o BatchMode=yes examplehost powershell*' -and $out -match 'EncodedCommand')
+$out = & $shim -s wsl local -c 'echo rrun-wsl-local-ok' 2>&1 | Out-String
+Check 'local wsl (bash inside this machine''s WSL) executes' ($out -match 'rrun-wsl-local-ok')
 & $shim -s zsh examplehost -c 'x' 2>$null
 Check 'invalid -s rejected by shim' ($LASTEXITCODE -eq 2)
 & $shim local -c 2>$null
@@ -153,6 +163,8 @@ if (Test-Path $gitBash) {
   Check 'REGRESSION: bash shim -n local dry-runs' ($out -match 'EncodedCommand')
   $out = & $gitBash $gb -s bash local -c 'echo rrun-selftest-ok' 2>&1 | Out-String
   Check 'bash shim local mode' ($out -match 'rrun-selftest-ok') $out.Trim()
+  $out = & $gitBash $gb -s wsl local -c 'echo rrun-wsl-local-ok' 2>&1 | Out-String
+  Check 'bash shim local wsl mode (== local bash)' ($out -match 'rrun-wsl-local-ok') $out.Trim()
   $u16Fwd = $u16File -replace '\\', '/'
   $out = & $gitBash $gb local $u16Fwd 2>&1 | Out-String
   Check 'REGRESSION: UTF-16LE payload file decodes (bash shim local)' ($out -match 'u16len:4') $out.Trim()
@@ -219,13 +231,20 @@ if ($TargetHost) {
     $out = & $shim $TargetHost $u16File 2>&1 | Out-String
     Check 'REGRESSION: UTF-16LE payload decodes on remote Windows host' ($out -match 'u16len:4') $out.Trim()
   }
-  if ($TargetShell -in @('bash', 'sh')) {
+  if ($TargetShell -in @('bash', 'sh', 'wsl')) {
     # large payload -> exercises the stdin-streaming transport end to end
     $lines = @('echo rrun-big-start') + (1..400 | ForEach-Object { "# padding line $_ to push the payload well past the streaming threshold" }) + @('echo rrun-big-ok')
     $bigFile = Join-Path $tmpDir 'big-payload.sh'
     [IO.File]::WriteAllText($bigFile, ($lines -join "`n") + "`n")
-    $out = & $shim -s $TargetShell $TargetHost $bigFile 2>&1 | Out-String
-    Check 'large payload streams via stdin (real host)' ($out -match 'rrun-big-ok')
+    if ($TargetShell -eq 'wsl') {
+      # -s wsl streams to a WINDOWS sshd, so the known streamed-session wedge
+      # race applies -- run through the timeout+retry helper, never bare.
+      $r = Invoke-RrunStreamRetry $TargetHost $bigFile $shim 'wsl'
+      Check 'large payload streams via stdin (real host, wsl target)' ($r.Out -match 'rrun-big-ok') $r.Out.Trim()
+    } else {
+      $out = & $shim -s $TargetShell $TargetHost $bigFile 2>&1 | Out-String
+      Check 'large payload streams via stdin (real host)' ($out -match 'rrun-big-ok')
+    }
   }
   if ($TargetShell -eq 'ps') {
     # REGRESSION: large ps payload over the streaming bootstrap, against a REAL

@@ -31,7 +31,7 @@ non-zero if anything rrun-shaped remains.
 ## 2. Rules of engagement once installed (offer these to the user for their global CLAUDE.md — their call)
 
 - **Payload-as-data rule**: never pass non-trivial payloads through nested interpreter layers as escaped strings. Write tool → file → run the file, or use `rrun`. More than one level of quoting = switch patterns.
-- Use `rrun` instead of hand-quoting any `ssh`/`wsl bash -c`/nested `powershell -Command` invocation. Default target shell is `ps`; pass `-s bash` for Linux hosts.
+- Use `rrun` instead of hand-quoting any `ssh`/`wsl bash -c`/nested `powershell -Command` invocation. Default target shell is `ps`; pass `-s bash` for Linux hosts, `-s wsl` for bash inside a Windows host's WSL.
 - No heredocs in the Windows Bash tool (CRLF corrupts them) — Write tool → file → run.
 - The Windows Bash tool is Git Bash (MSYS): it mangles POSIX-looking args to native exes. The installed `wsl`/`adb` wrappers handle those two; prefix `MSYS_NO_PATHCONV=1` for others.
 - **RSI rule**: when a failure belongs to a class this tool was built to eliminate, fix the tool (and note it in the file header + commit), not just the instance.

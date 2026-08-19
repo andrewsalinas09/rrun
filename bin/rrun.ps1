@@ -15,7 +15,7 @@
 #                       (WSL2 has no USB passthrough). Defaults to -s sh; streams
 #                       over stdin past RRUN_STREAM_LIMIT so the 32767-char
 #                       Windows command line cannot truncate a big payload.
-# usage mirrors WSL rrun:  rrun [-s ps|bash|sh] [-J jumps] [-n] <host[,hop2,...]|local|adb[:serial]> <script|-|-c "cmds">
+# usage mirrors WSL rrun:  rrun [-s ps|bash|sh|wsl] [-J jumps] [-n] <host[,hop2,...]|local|adb[:serial]> <script|-|-c "cmds">
 # history: v1 2026-08-10 created from transcript-error audit; v1.1 $HOME trampoline,
 #          CLIXML suppression; v1.2 review fixes -- -n honored in local mode (was
 #          EXECUTING on dry-run), -c args no longer path-translated, -s validated,
@@ -54,7 +54,11 @@
 #          and exited 0 -- a silent wrong answer, the class this tool exists to
 #          kill. TMPDIR pinned to /data/local/tmp (Android has no /tmp and
 #          mktemp is the wrapper's first statement); stdin-streaming above
-#          RRUN_STREAM_LIMIT.
+#          RRUN_STREAM_LIMIT;
+#          v1.14 2026-08-19 -s wsl (bash inside WSL on a Windows host, core
+#          v2.9): accepted and forwarded for remote hosts; for host "local"
+#          it IS -s bash (this machine is the Windows host -- the payload runs
+#          under bash in this machine's WSL); rejected for adb targets.
 $ErrorActionPreference = 'Stop'
 
 function Fail([string]$msg) {
@@ -75,8 +79,8 @@ $opts = @(); $shell = ''; $dry = $false; $jump = $false
 while ($rest.Count -gt 0 -and $rest[0] -like '-*' -and $rest[0] -ne '-c' -and $rest[0] -ne '-') {
   switch ($rest[0]) {
     '-s' {
-      if ($rest.Count -lt 2 -or @('ps', 'bash', 'sh') -notcontains $rest[1]) {
-        Fail 'rrun: -s must be ps, bash or sh'
+      if ($rest.Count -lt 2 -or @('ps', 'bash', 'sh', 'wsl') -notcontains $rest[1]) {
+        Fail 'rrun: -s must be ps, bash, sh or wsl'
       }
       $shell = $rest[1]; $opts += @('-s', $rest[1]); $rest = @($rest[2..($rest.Count)])
     }
@@ -89,7 +93,7 @@ while ($rest.Count -gt 0 -and $rest[0] -like '-*' -and $rest[0] -ne '-c' -and $r
   }
 }
 if ($rest.Count -lt 2) {
-  Fail 'usage: rrun [-s ps|bash|sh] [-J jumps] [-n] <host[,hop2,...]|local> <script | - | -c "cmds">'
+  Fail 'usage: rrun [-s ps|bash|sh|wsl] [-J jumps] [-n] <host[,hop2,...]|local> <script | - | -c "cmds">'
 }
 $hostSpec = $rest[0]; $rest = @($rest[1..($rest.Count - 1)])
 
@@ -120,8 +124,8 @@ if ($hostSpec -eq 'adb' -or $hostSpec -like 'adb:*') {
   }
   # Stock Android ships /system/bin/sh and neither bash nor PowerShell.
   if (-not $shell) { $shell = 'sh' }
-  if ($shell -eq 'ps') {
-    Fail 'rrun: -s ps is not valid for an adb target (Android has no PowerShell); use -s sh'
+  if ($shell -eq 'ps' -or $shell -eq 'wsl') {
+    Fail "rrun: -s $shell is not valid for an adb target (Android has neither PowerShell nor WSL); use -s sh"
   }
   $pb64 = [Convert]::ToBase64String($payloadBytes)
   # TMPDIR is pinned because mktemp is this wrapper's FIRST statement and Android
@@ -186,6 +190,9 @@ if ($hostSpec -eq 'local') {
     }
   }
   if (-not $shell) { $shell = if ($src -match '\.(sh|bash)$') { 'bash' } else { 'ps' } }
+  # host "local" IS the Windows machine that has the WSL: -s wsl and -s bash
+  # mean the same thing here (payload runs under bash inside this machine's WSL).
+  if ($shell -eq 'wsl') { $shell = 'bash' }
   if ($shell -eq 'ps') {
     # payload text never modified (a prepended statement broke param()/using,
     # which must be a script's first statements): a fixed wrapper sets

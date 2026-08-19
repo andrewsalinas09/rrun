@@ -93,6 +93,13 @@ Check 'REGRESSION: local -c with no command exits 2' ($LASTEXITCODE -eq 2)
 & $shim -s zsh local -c 'x' 2>$null
 Check 'invalid -s rejected' ($LASTEXITCODE -eq 2)
 
+# -s wsl local IS -s bash local (this machine is the Windows host with the
+# WSL). Dry-run only: CI runners have no WSL, and -n must compose without one.
+$out = & $shim -n -s wsl local -c 'echo ci-wsl' 2>&1 | Out-String
+Check '-s wsl local composes the WSL bash form (dry-run)' ($out -match 'wsl -e bash -c') $out.Trim()
+& $shim -s wsl adb -c 'x' 2>$null
+Check '-s wsl rejected for adb targets (Android has no WSL)' ($LASTEXITCODE -eq 2)
+
 Write-Host ''
 if ($script:fail -eq 0) { Write-Host 'ALL PASS' } else { Write-Host "$($script:fail) FAILURE(S)" }
 exit $script:fail
