@@ -21,7 +21,7 @@
 #                             no USB passthrough). Defaults to -s sh; streams the
 #                             payload over stdin past RRUN_STREAM_LIMIT so the
 #                             32767-char Windows command line can't truncate it.
-# usage mirrors WSL rrun:  rrun [-s ps|bash|sh|wsl] [-J jumps] [-n] <host[,hop2,...]|local|adb[:serial]> <script|-|-c "cmds">
+# usage mirrors WSL rrun:  rrun [-s ps|bash|sh|wsl|wsl:<user>] [-J jumps] [-n] <host[,hop2,...]|local|adb[:serial]> <script|-|-c "cmds">
 # history: v1 2026-08-10 created from transcript-error audit; v1.1 $HOME trampoline,
 #          CLIXML suppression; v1.2 review fixes — -n honored in local mode (was
 #          EXECUTING on dry-run), -c args no longer path-translated, -s validated,
@@ -47,6 +47,9 @@
 #          /data/local/tmp (Android has no /tmp and mktemp is the wrapper's
 #          first statement); stdin-streaming above RRUN_STREAM_LIMIT so the
 #          32767-char Windows command line cannot truncate a big payload;
+#          v1.12 2026-08-28 -s wsl:<user> (which WSL account to be; wsl:root
+#                reaches /root). Forwarded verbatim for a remote host; for
+#                host "local" it becomes `wsl -u <user>`.
 #          v1.11 2026-08-19 -s wsl (bash inside WSL on a Windows host, core
 #          v2.9): accepted and forwarded for remote hosts; for host "local"
 #          it IS -s bash (this machine is the Windows host — the payload runs
@@ -65,7 +68,13 @@ opts=() shell="" dry=0 jump=0
 while [[ ${1:-} == -* && ${1:-} != -c && ${1:-} != - ]]; do
   case $1 in
     -s)
-      case ${2:-} in ps|bash|sh|wsl) ;; *) echo "rrun: -s must be ps, bash, sh or wsl" >&2; exit 2 ;; esac
+      # wsl:<user> picks a WSL account other than the default (wsl:root reaches /root)
+      case ${2:-} in
+        ps|bash|sh|wsl) ;;
+        wsl:*[!A-Za-z0-9._-]*|wsl:) echo "rrun: -s wsl:<user> takes a plain user name" >&2; exit 2 ;;
+        wsl:*) ;;
+        *) echo "rrun: -s must be ps, bash, sh, wsl or wsl:<user>" >&2; exit 2 ;;
+      esac
       shell=$2; opts+=(-s "$2"); shift 2 ;;
     -J) jump=1; opts+=(-J "${2:?rrun: -J needs an argument}"); shift 2 ;;
     -n) dry=1; opts+=(-n); shift ;;
@@ -73,7 +82,7 @@ while [[ ${1:-} == -* && ${1:-} != -c && ${1:-} != - ]]; do
   esac
 done
 if (( $# < 2 )); then
-  echo 'usage: rrun [-s ps|bash|sh|wsl] [-J jumps] [-n] <host[,hop2,...]|local> <script | - | -c "cmds">' >&2
+  echo 'usage: rrun [-s ps|bash|sh|wsl|wsl:<user>] [-J jumps] [-n] <host[,hop2,...]|local> <script | - | -c "cmds">' >&2
   exit 2
 fi
 host=$1; shift
@@ -98,7 +107,7 @@ if [[ $host == adb || $host == adb:* ]]; then
   esac
   # Stock Android ships /system/bin/sh and neither bash nor PowerShell.
   [[ -z $shell ]] && shell=sh
-  if [[ $shell == ps || $shell == wsl ]]; then
+  if [[ $shell == ps || $shell == wsl || $shell == wsl:* ]]; then
     echo "rrun: -s $shell is not valid for an adb target (Android has neither PowerShell nor WSL); use -s sh" >&2
     exit 2
   fi
@@ -149,6 +158,9 @@ if [[ $host == local ]]; then
   if [[ -z $shell ]]; then
     case "$src" in *.sh|*.bash) shell=bash ;; *) shell=ps ;; esac
   fi
+  # wsl:<user> says which account to be; plain wsl means the distro default
+  wsl_user=
+  [[ $shell == wsl:* ]] && { wsl_user=${shell#wsl:}; shell=wsl; }
   # host "local" IS the Windows machine that has the WSL: -s wsl and -s bash
   # mean the same thing here (payload runs under bash inside this machine's WSL).
   [[ $shell == wsl ]] && shell=bash
@@ -175,10 +187,10 @@ if [[ $host == local ]]; then
     # and catchable signals. Exit status = the executor's own.
     run="t=\$(mktemp) || exit 125; trap \"rm -f \\\"\$t\\\"\" 0; trap exit 1 2 15; echo $b64 | base64 -d > \"\$t\" || { echo rrun: local decode failed >&2; exit 125; }; $shell \"\$t\""
     if (( dry )); then
-      printf 'wsl -e bash -c %q\n' "$run"
+      printf 'wsl %s-e bash -c %q\n' "${wsl_user:+-u $wsl_user }" "$run"
       exit 0
     fi
-    exec env MSYS_NO_PATHCONV=1 wsl.exe -e bash -c "$run"
+    exec env MSYS_NO_PATHCONV=1 wsl.exe ${wsl_user:+-u "$wsl_user"} -e bash -c "$run"
   fi
 fi
 

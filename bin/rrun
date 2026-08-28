@@ -5,9 +5,10 @@
 # that will execute it. For multi-hop chains, each intermediate ssh command is
 # itself re-armored, so quoting depth stays flat no matter how many hops.
 #
-# usage: rrun [-s ps|bash|sh|wsl] [-J jumphosts] [-n] <host[,host2,...]|adb[:serial]> <script | - | -c "cmds">
+# usage: rrun [-s ps|bash|sh|wsl|wsl:<user>] [-J jumphosts] [-n] <host[,host2,...]|adb[:serial]> <script | - | -c "cmds">
 #   -s ps|bash|sh|wsl  target shell on the FINAL host (default ps; *.sh/*.bash files -> bash;
 #                  adb targets default to sh — Android ships no bash and no PowerShell;
+#                  wsl:<user> runs as that WSL account (wsl:root reaches /root);
 #                  wsl = bash inside WSL on a WINDOWS host: the Windows side is
 #                  crossed exactly like ps, then wsl.exe carries the payload inward)
 #   -J jumphosts   ssh ProxyJump — preferred for hops when local can auth to the final host
@@ -178,6 +179,11 @@
 #                 layer (`s=$(echo b64 | base64 -d)`) instead of nested-quoted,
 #                 so the device command's own single quotes never meet the ssh
 #                 layer's.
+#   v2.10 2026-08-28 -s wsl:<user>: the WSL account to run as. -s wsl lands on
+#                 the distro default, leaving /root unreachable except by
+#                 hand-nesting `wsl -u root -- bash -c "..."` inside -s ps --
+#                 three interpreters deep, and it ate a quote. The user is a
+#                 wsl.exe argument, so the payload stays inert base64.
 #   v2.9  2026-08-19 WSL TARGET SHELL (-s wsl): bash inside WSL on a Windows
 #                 remote. Class fix per the RSI rule: `rrun -s bash <winhost>`
 #                 tried to exec sh/bash ON THE WINDOWS SIDE ("The term 'sh' is
@@ -220,7 +226,7 @@ done
 shift $((OPTIND-1))
 
 if (( $# < 2 )); then
-  echo 'usage: rrun [-s ps|bash|sh|wsl] [-J jumps] [-n] <host[,host2,...]|adb[:serial]> <script | - | -c "cmds">' >&2
+  echo 'usage: rrun [-s ps|bash|sh|wsl|wsl:<user>] [-J jumps] [-n] <host[,host2,...]|adb[:serial]> <script | - | -c "cmds">' >&2
   exit 2
 fi
 
@@ -262,9 +268,23 @@ if [[ -z $shell ]]; then
   esac
 fi
 
+# -s wsl:<user> picks a WSL account other than the distro default (wsl:root
+# reaches /root). Split it off here so every test below sees a plain "wsl".
+wsl_user=
+case "$shell" in
+  wsl:*)
+    wsl_user=${shell#wsl:}
+    shell=wsl
+    # the name becomes a wsl.exe argument inside a PowerShell string; keep it to
+    # characters that cannot end the quoting or start a new statement
+    if [[ ! $wsl_user =~ ^[A-Za-z0-9._-]+$ ]]; then
+      echo "rrun: -s wsl:<user> takes a plain user name (got '$wsl_user')" >&2; exit 2
+    fi ;;
+esac
+
 case "$shell" in
   ps|bash|sh|wsl) ;;
-  *) echo "rrun: -s must be ps, bash, sh or wsl (got '$shell')" >&2; exit 2 ;;
+  *) echo "rrun: -s must be ps, bash, sh, wsl or wsl:<user> (got '$shell')" >&2; exit 2 ;;
 esac
 
 if (( adb_target )) && [[ $shell == ps || $shell == wsl ]]; then
@@ -394,8 +414,10 @@ if [[ $shell == wsl ]]; then
   wsl_pre="t=\$(mktemp) || exit 125; trap 'rm -f \"\$t\"' 0; trap exit 1 2 15;"
   wsl_post="|| { echo rrun: remote decode failed >&2; exit 125; }; bash \"\$t\""
   wsl_guard="if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) { [Console]::Error.WriteLine('rrun: wsl.exe not found on target'); exit 125 }; "
+  # -u rides as its own native argument; the payload is untouched base64 either way
+  wsl_uarg=""; [[ -n $wsl_user ]] && wsl_uarg="-u $wsl_user "
   wb=$(printf %s "$wsl_pre echo $payload_b64 | base64 -d > \"\$t\" $wsl_post" | b64enc)
-  wsl_boot="\$ProgressPreference='SilentlyContinue'; $wsl_guard\$__c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$wb')); & wsl.exe -e sh -c \$__c; exit \$LASTEXITCODE"
+  wsl_boot="\$ProgressPreference='SilentlyContinue'; $wsl_guard\$__c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$wb')); & wsl.exe ${wsl_uarg}-e sh -c \$__c; exit \$LASTEXITCODE"
   wsl_embed_b64=$(printf %s "$wsl_boot" | iconv -f UTF-8 -t UTF-16LE | b64enc)
   # streamed: the bootstrap reads the payload base64 off the ssh channel itself
   # and pipes it into wsl.exe — explicit, not inherited-handle, so it behaves
@@ -403,7 +425,7 @@ if [[ $shell == wsl ]]; then
   # (and 5.1 re-encodes via $OutputEncoding — harmless, base64 is ASCII), and
   # GNU base64 -d rejects a bare \r as garbage, so the wrapper strips it first.
   wb=$(printf %s "$wsl_pre tr -d '\\r' | base64 -d > \"\$t\" $wsl_post" | b64enc)
-  wsl_boot="\$ProgressPreference='SilentlyContinue'; $wsl_guard\$__c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$wb')); [Console]::In.ReadToEnd() | & wsl.exe -e sh -c \$__c; exit \$LASTEXITCODE"
+  wsl_boot="\$ProgressPreference='SilentlyContinue'; $wsl_guard\$__c=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$wb')); [Console]::In.ReadToEnd() | & wsl.exe ${wsl_uarg}-e sh -c \$__c; exit \$LASTEXITCODE"
   wsl_stream_b64=$(printf %s "$wsl_boot" | iconv -f UTF-8 -t UTF-16LE | b64enc)
 fi
 

@@ -15,7 +15,7 @@
 #                       (WSL2 has no USB passthrough). Defaults to -s sh; streams
 #                       over stdin past RRUN_STREAM_LIMIT so the 32767-char
 #                       Windows command line cannot truncate a big payload.
-# usage mirrors WSL rrun:  rrun [-s ps|bash|sh|wsl] [-J jumps] [-n] <host[,hop2,...]|local|adb[:serial]> <script|-|-c "cmds">
+# usage mirrors WSL rrun:  rrun [-s ps|bash|sh|wsl|wsl:<user>] [-J jumps] [-n] <host[,hop2,...]|local|adb[:serial]> <script|-|-c "cmds">
 # history: v1 2026-08-10 created from transcript-error audit; v1.1 $HOME trampoline,
 #          CLIXML suppression; v1.2 review fixes -- -n honored in local mode (was
 #          EXECUTING on dry-run), -c args no longer path-translated, -s validated,
@@ -55,6 +55,9 @@
 #          kill. TMPDIR pinned to /data/local/tmp (Android has no /tmp and
 #          mktemp is the wrapper's first statement); stdin-streaming above
 #          RRUN_STREAM_LIMIT;
+#          v1.15 2026-08-28 -s wsl:<user> (which WSL account to be; wsl:root
+#                reaches /root). Passed through to the WSL rrun for a remote
+#                host; for host "local" it becomes `wsl -u <user>`.
 #          v1.14 2026-08-19 -s wsl (bash inside WSL on a Windows host, core
 #          v2.9): accepted and forwarded for remote hosts; for host "local"
 #          it IS -s bash (this machine is the Windows host -- the payload runs
@@ -79,8 +82,10 @@ $opts = @(); $shell = ''; $dry = $false; $jump = $false
 while ($rest.Count -gt 0 -and $rest[0] -like '-*' -and $rest[0] -ne '-c' -and $rest[0] -ne '-') {
   switch ($rest[0]) {
     '-s' {
-      if ($rest.Count -lt 2 -or @('ps', 'bash', 'sh', 'wsl') -notcontains $rest[1]) {
-        Fail 'rrun: -s must be ps, bash, sh or wsl'
+      # wsl:<user> picks a WSL account other than the default (wsl:root reaches /root)
+      if ($rest.Count -lt 2 -or ($rest[1] -notmatch '^(ps|bash|sh|wsl)$' -and
+                                 $rest[1] -notmatch '^wsl:[A-Za-z0-9._-]+$')) {
+        Fail 'rrun: -s must be ps, bash, sh, wsl or wsl:<user>'
       }
       $shell = $rest[1]; $opts += @('-s', $rest[1]); $rest = @($rest[2..($rest.Count)])
     }
@@ -93,7 +98,7 @@ while ($rest.Count -gt 0 -and $rest[0] -like '-*' -and $rest[0] -ne '-c' -and $r
   }
 }
 if ($rest.Count -lt 2) {
-  Fail 'usage: rrun [-s ps|bash|sh|wsl] [-J jumps] [-n] <host[,hop2,...]|local> <script | - | -c "cmds">'
+  Fail 'usage: rrun [-s ps|bash|sh|wsl|wsl:<user>] [-J jumps] [-n] <host[,hop2,...]|local> <script | - | -c "cmds">'
 }
 $hostSpec = $rest[0]; $rest = @($rest[1..($rest.Count - 1)])
 
@@ -192,6 +197,9 @@ if ($hostSpec -eq 'local') {
   if (-not $shell) { $shell = if ($src -match '\.(sh|bash)$') { 'bash' } else { 'ps' } }
   # host "local" IS the Windows machine that has the WSL: -s wsl and -s bash
   # mean the same thing here (payload runs under bash inside this machine's WSL).
+  # wsl:<user> additionally says which account to be.
+  $wslUser = ''
+  if ($shell -match '^wsl:(.+)$') { $wslUser = $Matches[1]; $shell = 'bash' }
   if ($shell -eq 'wsl') { $shell = 'bash' }
   if ($shell -eq 'ps') {
     # payload text never modified (a prepended statement broke param()/using,
@@ -238,9 +246,11 @@ if ($hostSpec -eq 'local') {
     # nothing with escaped quotes may cross as a native argument. (The payload
     # itself already crosses as inert base64; only this wrapper was at risk.)
     $run = 't=$(mktemp) || exit 125; trap ''rm -f "$t"'' 0; trap exit 1 2 15; echo ' + $b64 + ' | base64 -d > "$t" || { echo rrun: local decode failed >&2; exit 125; }; ' + $shell + ' "$t"'
-    if ($dry) { Write-Output "wsl -e bash -c `"$run`""; exit 0 }
+    $wslArgs = @(); if ($wslUser) { $wslArgs += @('-u', $wslUser) }
+    $wslArgs += @('-e', 'bash', '-c', $run)
+    if ($dry) { Write-Output ("wsl " + ($wslArgs -join ' ')); exit 0 }
     $ErrorActionPreference = 'Continue'   # see v1.11 note above: native stderr must not throw
-    & wsl.exe -e bash -c $run
+    & wsl.exe @wslArgs
     exit $LASTEXITCODE
   }
 }
